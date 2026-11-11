@@ -1,5 +1,6 @@
 import time
 import os
+import sys
 import cv2
 import numpy as np
 import pyautogui
@@ -9,7 +10,11 @@ import threading
 
 class RelicEnhanceV1:
     def __init__(self):
-        self.img_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "enhance_imgs")
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.dirname(__file__))
+        self.img_dir = os.path.join(base_dir, "assets", "enhance_imgs")
         
         self.unlock_btn_path = os.path.join(self.img_dir, "unlock_btn.png") 
         self.lock_btn_path = os.path.join(self.img_dir, "lock_btn.png")     
@@ -178,7 +183,7 @@ class RelicEnhanceV1:
         self.driver_trash_key = key_trash
             
         print(f">>> 遗器辅助已启动！强化键: {key_enhance} | 接管键: {key_toggle} | 加锁映射: {key_lock} | 弃置映射: {key_trash}")
-            
+        
         self.hk_enhance = keyboard.add_hotkey(key_enhance, lambda: threading.Thread(target=self.do_enhance).start())
         self.hk_toggle = keyboard.add_hotkey(key_toggle, self.toggle_macro)
 
