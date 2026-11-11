@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSpacerItem, QScroller, QScrollerProperties, QFileDialog
+from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSpacerItem, QScroller, QScrollerProperties, QFileDialog, QLineEdit, QHBoxLayout
 from qfluentwidgets import FluentIcon as FIF
-from qfluentwidgets import SettingCardGroup, PushSettingCard, ScrollArea, InfoBar, InfoBarPosition, MessageBox, PushButton
+from qfluentwidgets import SettingCardGroup, PushSettingCard, ScrollArea, InfoBar, InfoBarPosition, MessageBox, PushButton, ExpandSettingCard, SwitchButton, IndicatorPosition
 from .card.pushsettingcard1 import PushSettingCardCode
 from .card.autoplot_setting_card import AutoPlotSettingCard
 from .common.style_sheet import StyleSheet
@@ -16,10 +16,140 @@ import os
 import sys
 import traceback
 
+# ================= 引入遗器助手 =================
+from tasks.relic_enhance import RelicEnhanceV1
+# ================================================
 
 from module.localization import tr
 from module.logger import log
 
+# ================= 自定义按键捕获输入框 =================
+class HotkeyEdit(QLineEdit):
+    def __init__(self, default_key, parent=None):
+        super().__init__(parent)
+        self.setText(default_key)
+        self.setPlaceholderText("点击后按键...")
+        self.setFixedWidth(120)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.is_recording = False
+        self.original_key = default_key
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
+
+    def mousePressEvent(self, event):
+        if not self.is_recording:
+            self.is_recording = True
+            self.original_key = self.text()
+            self.setText("请按键...")
+            self.setStyleSheet("color: #00BFFF;")
+            self.setFocus()
+        super().mousePressEvent(event)
+
+    def focusOutEvent(self, event):
+        if self.is_recording:
+            self.is_recording = False
+            self.setText(self.original_key)
+            self.setStyleSheet("")
+        super().focusOutEvent(event)
+
+    def keyPressEvent(self, event):
+        if self.is_recording:
+            key_code = event.key()
+            modifiers = event.modifiers()
+
+            if key_code in (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+                return
+
+            key_str = ""
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                key_str += "ctrl+"
+            if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                key_str += "shift+"
+            if modifiers & Qt.KeyboardModifier.AltModifier:
+                key_str += "alt+"
+
+            key_text = event.text().lower()
+
+            if Qt.Key.Key_F1 <= key_code <= Qt.Key.Key_F12:
+                key_text = f"f{key_code - Qt.Key.Key_F1 + 1}"
+            elif key_code == Qt.Key.Key_Space:
+                key_text = "space"
+            elif key_code == Qt.Key.Key_Escape:
+                self.is_recording = False
+                self.setText(self.original_key)
+                self.setStyleSheet("")
+                self.clearFocus()
+                return
+
+            if not key_text:
+                return
+
+            key_str += key_text
+            self.setText(key_str)
+            self.is_recording = False
+            self.setStyleSheet("")
+            self.clearFocus()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+# ===========================================================
+
+# ================= 自定义带开关的展开卡片 =================
+class RelicEnhanceCard(ExpandSettingCard):
+    def __init__(self, parent=None):
+        super().__init__(FIF.CHAT, tr("遗器半自动助手"), tr("拦截鼠标侧键，实现自动置入/强化与快捷加锁/弃置"), parent)
+
+        # 【核心复刻】创建开关，文字在左，开关在右
+        self.switchButton = SwitchButton(tr('关'), self, IndicatorPosition.RIGHT)
+
+        # 【核心复刻】直接塞进 self.card 布局中，完美对齐
+        self.card.addWidget(self.switchButton)
+
+        # 绑定开关信号（用于启动/停止脚本）
+        self.switchButton.checkedChanged.connect(self.__onSwitchChanged)
+
+        # 布局输入框
+        self.hLayout1 = QHBoxLayout()
+        self.label1 = QLabel("强化键:")
+        self.edit_enhance = HotkeyEdit("f9", self)
+        self.hLayout1.addWidget(self.label1)
+        self.hLayout1.addWidget(self.edit_enhance)
+        self.hLayout1.addStretch(1)
+
+        self.hLayout2 = QHBoxLayout()
+        self.label2 = QLabel("接管键:")
+        self.edit_toggle = HotkeyEdit("f12", self)
+        self.hLayout2.addWidget(self.label2)
+        self.hLayout2.addWidget(self.edit_toggle)
+        self.hLayout2.addStretch(1)
+
+        self.hLayout3 = QHBoxLayout()
+        self.label3 = QLabel("前侧键映射(加锁):")
+        self.edit_lock = HotkeyEdit("ctrl+c", self)
+        self.hLayout3.addWidget(self.label3)
+        self.hLayout3.addWidget(self.edit_lock)
+        self.hLayout3.addStretch(1)
+
+        self.hLayout4 = QHBoxLayout()
+        self.label4 = QLabel("后侧键映射(弃置):")
+        self.edit_trash = HotkeyEdit("ctrl+v", self)
+        self.hLayout4.addWidget(self.label4)
+        self.hLayout4.addWidget(self.edit_trash)
+        self.hLayout4.addStretch(1)
+
+        self.viewLayout.addLayout(self.hLayout1)
+        self.viewLayout.addLayout(self.hLayout2)
+        self.viewLayout.addLayout(self.hLayout3)
+        self.viewLayout.addLayout(self.hLayout4)
+
+        self.setExpand(False) # 默认折叠
+
+    def __onSwitchChanged(self, isChecked: bool):
+        """由工具箱界面接管开启/关闭逻辑，这里只负责转发信号"""
+        # 因为外部的 ToolsInterface 需要监听这个信号来启动/停止脚本
+        # 我们在这里将信号转发出去，外部的 __onRelicSwitchChanged 会处理
+        # 但为了跟原生一样不报错，直接暴露即可，不需要自己写逻辑
+        pass
+# ===========================================================
 
 class ToolsInterface(ScrollArea):
     def __init__(self, parent=None):
@@ -73,6 +203,11 @@ class ToolsInterface(ScrollArea):
             tr("角色面板导出"),
             tr("读取全部角色的属性、光锥、星魂、技能和遗器，保存到程序目录的 characters.json")
         )
+
+        # ================= 遗器助手卡片实例化 =================
+        self.relicEnhanceTask = RelicEnhanceV1()
+        self.relicEnhanceCard = RelicEnhanceCard(self)
+        # ========================================================
 
         self.__initWidget()
 
@@ -134,6 +269,7 @@ class ToolsInterface(ScrollArea):
         self.toolsLabel.move(36, 30)
 
         self.ToolsGroup.addSettingCard(self.automaticPlotCard)
+        self.ToolsGroup.addSettingCard(self.relicEnhanceCard)
         self.ToolsGroup.addSettingCard(self.gameScreenshotCard)
         self.ToolsGroup.addSettingCard(self.unlockfpsCard)
         self.ToolsGroup.addSettingCard(self.redemptionCodeCard)
@@ -336,11 +472,40 @@ class ToolsInterface(ScrollArea):
         self.screenTestCard.clicked.connect(self.__onScreenTestCardClicked)
         self.characterExportCard.clicked.connect(self.__onCharacterExportCardClicked)
 
+        # ================= 绑定遗器助手开关事件 =================
+        self.relicEnhanceCard.switchButton.checkedChanged.connect(self.__onRelicSwitchChanged)
+        # ========================================================
+
     def __onScreenTestCardClicked(self):
         start_task("screen_test")
 
     def __onCharacterExportCardClicked(self):
         start_task("character_export")
+
+    # ================= 遗器助手开关逻辑 =================
+    def __onRelicSwitchChanged(self, isChecked: bool):
+        # 让文字跟随开关状态变化
+        self.relicEnhanceCard.switchButton.setText(tr('开') if isChecked else tr('关'))
+
+        if isChecked:
+            k_enhance = self.relicEnhanceCard.edit_enhance.text().strip().lower()
+            k_toggle = self.relicEnhanceCard.edit_toggle.text().strip().lower()
+            k_lock = self.relicEnhanceCard.edit_lock.text().strip().lower()
+            k_trash = self.relicEnhanceCard.edit_trash.text().strip().lower()
+
+            if not k_enhance or not k_toggle or not k_lock or not k_trash or "请按键" in k_enhance or "请按键" in k_toggle:
+                InfoBar.warning(title=tr('错误'), content=tr("按键不能为空，请展开重新录制"), orient=Qt.Orientation.Horizontal, isClosable=True, position=InfoBarPosition.TOP, duration=2000, parent=self)
+                self.relicEnhanceCard.switchButton.setChecked(False) # 失败则恢复关闭状态
+                return
+
+            self.relicEnhanceTask.start_listen(k_enhance, k_toggle, k_lock, k_trash)
+            self.relicEnhanceCard.setContent(tr(f"状态：运行中 (强化: {k_enhance.upper()} / 接管: {k_toggle.upper()})"))
+            InfoBar.success(title=tr('启动成功'), content=tr(f"请在游戏内使用 {k_enhance.upper()} 和 {k_toggle.upper()}"), orient=Qt.Orientation.Horizontal, isClosable=True, position=InfoBarPosition.TOP, duration=2000, parent=self)
+        else:
+            self.relicEnhanceTask.stop_listen()
+            self.relicEnhanceCard.setContent(tr("拦截鼠标侧键，实现自动置入/强化与快捷加锁/弃置"))
+            InfoBar.info(title=tr('已停止'), content=tr("遗器助手已停止运行"), orient=Qt.Orientation.Horizontal, isClosable=True, position=InfoBarPosition.TOP, duration=2000, parent=self)
+    # ====================================================
 
     def __onAutoPlotSwitchChanged(self, isChecked: bool):
         """Handle auto plot switch state change"""
