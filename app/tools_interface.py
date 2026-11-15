@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSpacerItem, QScroller, QScrollerProperties, QFileDialog, QLineEdit, QHBoxLayout
+from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QLineEdit, QVBoxLayout, QSpacerItem, QScroller, QScrollerProperties, QFileDialog
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import SettingCardGroup, PushSettingCard, ScrollArea, InfoBar, InfoBarPosition, MessageBox, PushButton, ExpandSettingCard, SwitchButton, IndicatorPosition
 from .card.pushsettingcard1 import PushSettingCardCode
@@ -23,10 +23,10 @@ import traceback
 from tasks.relic_enhance import RelicEnhanceV1
 # ================================================
 
+
 from module.localization import tr
 from module.logger import log
 
-# ================= 自定义按键捕获输入框 =================
 class HotkeyEdit(QLineEdit):
     def __init__(self, default_key, parent=None):
         super().__init__(parent)
@@ -152,7 +152,8 @@ class RelicEnhanceCard(ExpandSettingCard):
         # 我们在这里将信号转发出去，外部的 __onRelicSwitchChanged 会处理
         # 但为了跟原生一样不报错，直接暴露即可，不需要自己写逻辑
         pass
-# ===========================================================
+
+
 
 class ToolsInterface(ScrollArea):
     def __init__(self, parent=None):
@@ -212,13 +213,13 @@ class ToolsInterface(ScrollArea):
             tr("桌面分身"),
             tr("在独立的 Windows 桌面中运行小助手和游戏")
         )
-        self._desktop_twin = None
-        self._desktop_twin_hosting = False
 
         # ================= 遗器助手卡片实例化 =================
         self.relicEnhanceTask = RelicEnhanceV1()
         self.relicEnhanceCard = RelicEnhanceCard(self)
         # ========================================================
+        self._desktop_twin = None
+        self._desktop_twin_hosting = False
 
         self.__initWidget()
         self.refreshBackendTasks()
@@ -500,6 +501,10 @@ class ToolsInterface(ScrollArea):
         self.characterExportCard.clicked.connect(self.__onCharacterExportCardClicked)
         self.desktopTwinCard.clicked.connect(self.openDesktopTwin)
 
+        # ================= 绑定遗器助手开关事件 =================
+        self.relicEnhanceCard.switchButton.checkedChanged.connect(self.__onRelicSwitchChanged)
+        # ========================================================
+
     def openDesktopTwin(self):
         if sys.platform != "win32" or in_desktop_twin():
             return
@@ -557,10 +562,6 @@ class ToolsInterface(ScrollArea):
         self.screenTestCard.setVisible(task_is_supported("screen_test", cfg))
         self.characterExportCard.setVisible(task_is_supported("character_export", cfg))
 
-        # ================= 绑定遗器助手开关事件 =================
-        self.relicEnhanceCard.switchButton.checkedChanged.connect(self.__onRelicSwitchChanged)
-        # ========================================================
-
     def __onScreenTestCardClicked(self):
         start_task("screen_test")
 
@@ -591,6 +592,7 @@ class ToolsInterface(ScrollArea):
             self.relicEnhanceCard.setContent(tr("拦截鼠标侧键，实现自动置入/强化与快捷加锁/弃置"))
             InfoBar.info(title=tr('已停止'), content=tr("遗器助手已停止运行"), orient=Qt.Orientation.Horizontal, isClosable=True, position=InfoBarPosition.TOP, duration=2000, parent=self)
     # ====================================================
+
 
     def __onAutoPlotSwitchChanged(self, isChecked: bool):
         """Handle auto plot switch state change"""
