@@ -10,8 +10,11 @@ import tasks.tool as tool
 import base64
 import subprocess
 from utils import clipboard
+from utils.desktop_twin import in_desktop_twin
 from module.config import cfg
+from module.config.platform import get_control_backend
 from tasks.base.tasks import start_task
+from utils.tasks import task_is_supported
 import os
 import sys
 import traceback
@@ -203,6 +206,14 @@ class ToolsInterface(ScrollArea):
             tr("角色面板导出"),
             tr("读取全部角色的属性、光锥、星魂、技能和遗器，保存到程序目录的 characters.json")
         )
+        self.desktopTwinCard = PushSettingCard(
+            tr("打开"),
+            FIF.APPLICATION,
+            tr("桌面分身"),
+            tr("在独立的 Windows 桌面中运行小助手和游戏")
+        )
+        self._desktop_twin = None
+        self._desktop_twin_hosting = False
 
         # ================= 遗器助手卡片实例化 =================
         self.relicEnhanceTask = RelicEnhanceV1()
@@ -210,8 +221,9 @@ class ToolsInterface(ScrollArea):
         # ========================================================
 
         self.__initWidget()
+        self.refreshBackendTasks()
 
-        if sys.platform == 'win32' and self.automaticPlotCard.getSwitchState():
+        if sys.platform == 'win32' and not self.automaticPlotCard.isHidden() and self.automaticPlotCard.getSwitchState():
             self.__startAutoPlot()
 
     def retranslateUi(self):
@@ -242,6 +254,17 @@ class ToolsInterface(ScrollArea):
         self.characterExportCard.setTitle(tr('角色面板导出'))
         self.characterExportCard.setContent(tr('读取全部角色的属性、光锥、星魂、技能和遗器，保存到程序目录的 characters.json'))
         self.characterExportCard.button.setText(tr('导出'))
+        self._refreshDesktopTwinCard()
+        if self._desktop_twin is not None:
+            self._desktop_twin.retranslateUi()
+
+    def _refreshDesktopTwinCard(self):
+        self.desktopTwinCard.setTitle(tr("桌面分身"))
+        if self._desktop_twin_hosting:
+            self.desktopTwinCard.setContent(tr("分身正在运行，打开窗口可查看分身画面或注销分身"))
+        else:
+            self.desktopTwinCard.setContent(tr("在独立的 Windows 桌面中运行小助手和游戏"))
+        self.desktopTwinCard.button.setText(tr("打开"))
 
     def __initWidget(self):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -274,13 +297,17 @@ class ToolsInterface(ScrollArea):
         self.ToolsGroup.addSettingCard(self.unlockfpsCard)
         self.ToolsGroup.addSettingCard(self.redemptionCodeCard)
         self.ToolsGroup.addSettingCard(self.cloudTouchCard)
-        self.ToolsGroup.addSettingCard(self.screenTestCard)
+        self.ToolsGroup.addSettingCard(self.desktopTwinCard)
         self.ToolsGroup.addSettingCard(self.characterExportCard)
+        self.ToolsGroup.addSettingCard(self.screenTestCard)
 
         if sys.platform != 'win32':
             self.automaticPlotCard.setDisabled(True)
             self.unlockfpsCard.setDisabled(True)
             self.cloudTouchCard.setDisabled(True)
+            self.desktopTwinCard.setDisabled(True)
+        elif in_desktop_twin():
+            self.desktopTwinCard.hide()
 
         self.ToolsGroup.titleLabel.setHidden(True)
 
@@ -370,7 +397,7 @@ class ToolsInterface(ScrollArea):
             if not game_path or not os.path.exists(game_path):
                 InfoBar.warning(
                     title=tr('游戏路径配置错误(╥╯﹏╰╥)'),
-                    content=tr("请在“设置”→“程序”中配置正确的游戏路径"),
+                    content=tr("请在“设置”→“游戏连接”中配置正确的游戏路径"),
                     orient=Qt.Orientation.Horizontal,
                     isClosable=True,
                     position=InfoBarPosition.TOP,
@@ -471,6 +498,64 @@ class ToolsInterface(ScrollArea):
         self.cloudTouchCard.clicked.connect(self.__onCloudTouchCardClicked)
         self.screenTestCard.clicked.connect(self.__onScreenTestCardClicked)
         self.characterExportCard.clicked.connect(self.__onCharacterExportCardClicked)
+        self.desktopTwinCard.clicked.connect(self.openDesktopTwin)
+
+    def openDesktopTwin(self):
+        if sys.platform != "win32" or in_desktop_twin():
+            return
+        if self._desktop_twin is None:
+            from .tools.desktop_twin import DesktopTwinDialog
+
+            self._desktop_twin = DesktopTwinDialog(
+                self.window(), self.parent.logInterface, getattr(self.parent, "checkDesktopTwinReady", None),
+            )
+            hosting_changed = getattr(self.parent, "setDesktopTwinHosting", None)
+            if hosting_changed:
+                self._desktop_twin.hostingChanged.connect(hosting_changed)
+            self._desktop_twin.destroyed.connect(self._forgetDesktopTwin)
+        if self._desktop_twin.isMinimized():
+            # 还原到最小化之前的状态，最大化的窗口仍然最大化
+            self._desktop_twin.setWindowState(self._desktop_twin.windowState() & ~Qt.WindowState.WindowMinimized)
+        self._desktop_twin.show()
+        self._desktop_twin.raise_()
+        self._desktop_twin.activateWindow()
+
+    def _forgetDesktopTwin(self):
+        self._desktop_twin = None
+
+    def desktopTwinActive(self):
+        return self._desktop_twin is not None and self._desktop_twin.active
+
+    def closeDesktopTwin(self):
+        if self.desktopTwinActive():
+            self.openDesktopTwin()
+        return self._desktop_twin is None or self._desktop_twin.close()
+
+    def setDesktopTwinHosting(self, active):
+        self._desktop_twin_hosting = active
+        self._refreshDesktopTwinCard()
+        for card in (
+            self.automaticPlotCard, self.gameScreenshotCard, self.unlockfpsCard, self.redemptionCodeCard,
+            self.cloudTouchCard, self.screenTestCard, self.characterExportCard,
+        ):
+            card.setDisabled(active)
+        if active:
+            tool.stop_plot()
+        elif not self.automaticPlotCard.isHidden() and self.automaticPlotCard.getSwitchState():
+            self.__startAutoPlot()
+
+    def refreshBackendTasks(self):
+        adb = get_control_backend(cfg) == "adb"
+        was_hidden = self.automaticPlotCard.isHidden()
+        for card in (self.automaticPlotCard, self.gameScreenshotCard, self.unlockfpsCard, self.cloudTouchCard):
+            card.setVisible(not adb)
+        if adb:
+            tool.stop_plot()
+        elif was_hidden and not self._desktop_twin_hosting and self.automaticPlotCard.getSwitchState():
+            self.__startAutoPlot()
+        self.redemptionCodeCard.setVisible(task_is_supported("redemption", cfg))
+        self.screenTestCard.setVisible(task_is_supported("screen_test", cfg))
+        self.characterExportCard.setVisible(task_is_supported("character_export", cfg))
 
         # ================= 绑定遗器助手开关事件 =================
         self.relicEnhanceCard.switchButton.checkedChanged.connect(self.__onRelicSwitchChanged)

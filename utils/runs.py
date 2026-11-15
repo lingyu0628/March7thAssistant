@@ -52,6 +52,7 @@ LOCK_ACQUIRED = "acquired"
 LOCK_FORCED = "forced"              # 已有任务在运行，按 --force 越过
 LOCK_BUSY = "busy"                  # 已有任务在运行（持有进程确认存活），本次不执行
 LOCK_UNAVAILABLE = "unavailable"    # 锁文件无法读写，无法判断是否已有任务在运行
+INVOKER_DESKTOP_TWIN = "desktop_twin"
 
 # 锁文件读写失败时的重试（Windows 上另一进程正在替换 / 删除同一文件等瞬时占用）
 _LOCK_ATTEMPTS = 5
@@ -252,9 +253,9 @@ def acquire_run_lock(info: dict, force: bool = False):
             alive = isinstance(holder, dict) and is_process_alive(holder.get("pid"), holder.get("pid_create_time"))
             if alive and holder.get("run_id") == info.get("run_id"):
                 return True, None
-            if alive and not force:
-                return False, holder
-            if alive and force:
+            if alive:
+                if not force or INVOKER_DESKTOP_TWIN in (info.get("invoker"), holder.get("invoker")):
+                    return False, holder
                 _atomic_write_json(path, info)
                 return True, holder
             # 陈旧锁（持有进程已退出）：确认仍是同一份陈旧内容后再移除，避免误删别人刚取得的锁
@@ -275,12 +276,19 @@ def acquire_run_lock(info: dict, force: bool = False):
 def release_run_lock(run_id: str):
     """释放运行锁（只释放自己持有的）。"""
     path = _lock_path()
-    holder = _read_json(path)
-    if isinstance(holder, dict) and holder.get("run_id") == run_id:
+    # Windows 上并发读取可能短暂阻止删除。重试前重新确认持有者。
+    for attempt in range(1, _LOCK_ATTEMPTS + 1):
+        holder = _read_json(path)
+        if not isinstance(holder, dict) or holder.get("run_id") != run_id:
+            return
         try:
             os.remove(path)
+            return
+        except PermissionError:
+            if attempt < _LOCK_ATTEMPTS:
+                time.sleep(_LOCK_RETRY_DELAY)
         except OSError:
-            pass
+            return
 
 
 # ---------- 输出捕获 ----------
@@ -443,6 +451,12 @@ class RunSession:
             _atomic_write_json(run_file(self.run_id, ".json"), self.record)
         except Exception:
             pass
+
+    def update_record(self, **fields):
+        """登记本次运行的元数据，供其他进程立即读取。"""
+        if not self._finished:
+            self.record.update(fields)
+            self._save()
 
     def note(self, **fields):
         """登记收尾时要写入的字段（status / error / reason / screenshot），以 finish 时为准。"""
