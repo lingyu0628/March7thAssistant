@@ -7270,6 +7270,10 @@ msgstr ""
 "The Android game exited. Check the game's background settings on the device "
 "and try again."
 
+#: module/game/adb.py:290
+msgid "重新启动后，Android 游戏窗口再次消失"
+msgstr "The Android game window disappeared again after the game restarted."
+
 #: module/game/adb.py:148
 msgid "游戏未能回到目标 Android 屏幕，请结束游戏后重试"
 msgstr ""
@@ -8124,6 +8128,10 @@ msgstr "Daily training activity {activity}/{maximum}"
 msgid "奖励检查完成，{daily_summary}"
 msgstr "Reward check complete ({daily_summary})"
 
+#: tasks/touch/power.py:647
+msgid "已完成 {count} 次挑战"
+msgstr "Completed {count} challenges"
+
 #: tasks/touch/power.py:534
 msgid "已完成 {count} 次挑战，剩余开拓力 {power}/300"
 msgstr ""
@@ -8395,7 +8403,6 @@ msgstr ""
 msgid "确认合并"
 msgstr "Confirm merge"
 
-
 #: app/warp_interface.py:142
 msgid "选择导入方式"
 msgstr "Choose import method"
@@ -8487,3 +8494,44 @@ msgstr "Strategy first"
 #: app/setting_interface.py:660
 msgid "图鉴优先"
 msgstr "Uncollected entries first"
+
+#: app/setting_interface.py:615
+msgid "总时限"
+msgstr "Time limit"
+
+#: app/setting_interface.py:616
+msgid "单次运行的分钟数，0 表示不限时"
+msgstr "Minutes per run; 0 means no limit"
+
+#: app/setting_interface.py:2658
+msgid "GitHub Token"
+msgstr "GitHub Token"
+
+#: module/update/version_check.py:374
+msgid "读取 GitHub Releases 页面失败（GitHub API 返回 HTTP 403）"
+msgstr ""
+"Could not load the GitHub Releases page (GitHub API returned HTTP 403)"
+
+#: module/game/adb.py:515
+msgid "检测到多个显示器，无法确定模拟器 display 0 对应的 SurfaceFlinger ID"
+msgstr ""
+"Multiple displays detected. Could not resolve the SurfaceFlinger ID for "
+"emulator display 0."
+
+#: module/game/adb.py:524
+msgid "模拟器 display 0 的截图输出为空"
+msgstr "Emulator display 0 returned an empty screenshot."
+
+#: module/game/adb.py:526
+msgid "模拟器 display 0 的截图输出不符合 PNG 格式（{size} 字节）"
+msgstr ""
+"Emulator display 0 returned an unexpected screenshot format ({size} bytes, "
+"expected PNG)."
+
+#: app/tools/desktop_twin.py:713
+msgid "查看排查方法"
+msgstr "Troubleshooting"
+
+#: app/setting_interface.py:2569
+msgid "后台操作模式已移至「游戏连接」"
+msgstr "Background mode moved to Game connection"

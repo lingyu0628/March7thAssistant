@@ -15,11 +15,22 @@ from module.game.adb_transport import (
 )
 from module.game.base import FrameCapture, GameControllerBase
 from module.localization import tr
+from utils.pause import pause_ctl
 
 
 _GAME_ACTIVITY = "com.mihoyo.combosdk.ComboSDKActivity"
 _GAME_COMPONENT = f"{GAME_PACKAGE}/{_GAME_ACTIVITY}"
 _TEMPORARY_INPUT_ERRORS = {"game_not_on_display", "sdk_window_active"}
+_STARTUP_TASK_MISSING_MS = 1000
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_MULTI_DISPLAY_WARNING = b"[Warning] Multiple displays were found"
+
+
+@dataclass
+class _GameStartup:
+    saw_task: bool = False
+    missing_since_ms: int | None = None
+    relaunched: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,7 +71,9 @@ class AdbGameController(GameControllerBase):
 
     def _reset_display(self):
         self._on_event = None
+        self._startup = None
         self._display_id = None
+        self._emulator_physical_display_id = None
         self._game_display_id = None
         self._watching = False
         self._sdk_window = False
@@ -167,8 +180,12 @@ class AdbGameController(GameControllerBase):
                 self._failure = AdbError("move_back_failed", tr("游戏未能回到目标 Android 屏幕，请结束游戏后重试"))
         elif name == "manual_action_required":
             self._failure = AdbError(name, tr("游戏需要手动登录，请在 Android 实体屏或模拟器中完成登录后重试"))
-        elif name == "game_exited":
+        elif name == "game_exited" and (self._startup is None or not self._startup.saw_task):
             self._failure = AdbError(name, tr("Android 游戏进程已退出，请检查游戏与设备的后台设置后重试"))
+        if (self._startup is not None and name in {"watchdog_started", "task_display_changed"}
+                and self._game_display_id is not None):
+            self._startup.saw_task = True
+            self._startup.missing_since_ms = None
 
     def _poll_events(self, *, force=False):
         if not self._watching or (not force and time.monotonic() - self._last_event_poll < 0.35):
@@ -232,7 +249,7 @@ class AdbGameController(GameControllerBase):
                 self._display_id = response["display_id"]
             return self._display_id
 
-    def start_game_process(self) -> bool:
+    def start_game_process(self, *, recover_startup=False) -> bool:
         with self._lock:
             display_id = self.prepare_display()
             if not self._environment.game_installed:
@@ -240,6 +257,8 @@ class AdbGameController(GameControllerBase):
             if self._watching:
                 self._poll_events(force=True)
                 return True
+            if recover_startup:
+                self._startup = _GameStartup()
 
             # MuMu 的独立应用窗口可能把显式指定到 display 0 的启动重定向到外接屏。
             self._call("watchdog", package=GAME_PACKAGE, main_activity=_GAME_ACTIVITY, display_id=display_id,
@@ -249,6 +268,47 @@ class AdbGameController(GameControllerBase):
             self._watching = True
             self._poll_events(force=True)
             return True
+
+    def recover_game_start(self, deadline):
+        """启动期确认窗口持续消失后，在原虚拟屏补一次启动。"""
+        with self._lock:
+            startup = self._startup
+            if startup is None or not startup.saw_task or self._game_display_id is not None:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                return
+            response, _ = self._call("status", timeout=min(4, remaining))
+            watchdog = response["watchdog"]
+            if watchdog.get("task") is not None or not watchdog.get("interactive") or watchdog.get("keyguard_locked"):
+                startup.missing_since_ms = None
+                return
+            checked = watchdog.get("task_checked_ms")
+            if type(checked) is not int or checked <= 0:
+                return
+            if startup.missing_since_ms is None:
+                startup.missing_since_ms = checked
+            if checked - startup.missing_since_ms < _STARTUP_TASK_MISSING_MS:
+                return
+            if startup.relaunched:
+                raise AdbError("game_exited", tr("重新启动后，Android 游戏窗口再次消失"))
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                return
+            result, _ = self._call(
+                "launch_if_missing", timeout=min(4, remaining), timeout_ms=min(3000, int(remaining * 1000)),
+                display_id=self._display_id, component=_GAME_COMPONENT, wait=False,
+            )
+            startup.missing_since_ms = None
+            if result["launched"]:
+                startup.relaunched = True
+                startup.saw_task = False
+                self._min_seq = max(self._min_seq, result["seq"] + 1)
+                self.log_warning("Android 游戏窗口已消失，已在原虚拟屏重新启动星铁")
+
+    def finish_game_startup(self):
+        with self._lock:
+            self._startup = None
 
     def is_game_running(self) -> bool:
         with self._lock:
@@ -417,17 +477,60 @@ class AdbGameController(GameControllerBase):
     def _capture_emulator(self, pixels):
         # S1 的 ImageReader 只接虚拟屏。screencap 在输入应答之后才启动，
         # 本地序号只统计成功的采样。是否切换界面仍由调用方检查画面。
-        try:
-            data = self._service.adb.run("exec-out", "screencap", "-p", binary=True)
-        except AdbError as error:
-            self._failure = error
-            raise
+        for attempt in range(2):
+            pause_ctl.check_stop()
+            try:
+                data = self._read_emulator_png(refresh_display=attempt > 0)
+                pause_ctl.check_stop()
+                image = self._decode_emulator_png(data, pixels)
+            except AdbError as error:
+                self._landscape = False
+                pause_ctl.check_stop()
+                if attempt or error.code not in {"adb_failed", "invalid_response"}:
+                    if error.code != "invalid_response":
+                        self._failure = error
+                    raise
+            else:
+                self._landscape = image is not None
+                return (self._frame_seq + 1, image) if image is not None else False
+
+            self._poll_events(force=True)
+            if not self._display_available():
+                return False
+
+    def _read_emulator_png(self, *, refresh_display):
+        adb = self._service.adb
+        command = ("exec-out", "screencap", "-p")
+        display_id = self._emulator_physical_display_id
+        if display_id is None:
+            data = adb.run(*command, binary=True)
+            # exec-out 会把设备端警告混进 PNG。多屏时默认捕获的画面也可能来自其他屏。
+            if data.startswith(_PNG_SIGNATURE) or _MULTI_DISPLAY_WARNING not in data[:512]:
+                return data
+
+        if display_id is None or refresh_display:
+            pause_ctl.check_stop()
+            display_id = adb.primary_physical_display_id()
+            if display_id is None:
+                raise AdbError("invalid_response", tr("检测到多个显示器，无法确定模拟器 display 0 对应的 SurfaceFlinger ID"))
+            self._emulator_physical_display_id = display_id
+
+        pause_ctl.check_stop()
+        return adb.run(*command, "-d", display_id, binary=True)
+
+    @staticmethod
+    def _decode_emulator_png(data, pixels):
+        if not data:
+            raise AdbError("invalid_response", tr("模拟器 display 0 的截图输出为空"))
+        if not data.startswith(_PNG_SIGNATURE):
+            raise AdbError("invalid_response", tr("模拟器 display 0 的截图输出不符合 PNG 格式（{size} 字节）").format(
+                size=len(data),
+            ))
         try:
             with Image.open(BytesIO(data)) as image:
-                self._landscape = image.size == RESOLUTION
-                if not self._landscape:
-                    return False
+                if image.size != RESOLUTION:
+                    return None
                 x, y, w, h = pixels
-                return self._frame_seq + 1, image.crop((x, y, x + w, y + h)).convert("RGB")
-        except OSError as error:
+                return image.crop((x, y, x + w, y + h)).convert("RGB")
+        except (OSError, SyntaxError, Image.DecompressionBombError) as error:
             raise AdbError("invalid_response", tr("无法解码模拟器 display 0 的截图")) from error

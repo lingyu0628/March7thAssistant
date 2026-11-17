@@ -1,5 +1,9 @@
+import sys
+
 from module.logger import log
 from module.config import cfg
+from module.config.platform import get_control_backend
+from module.game import cloud_game
 from module.screen import screen
 from utils.date import Date
 from tasks.base.task_steps import run_steps
@@ -14,7 +18,7 @@ from tasks.daily.synthesis import Synthesis
 import tasks.challenge as challenge
 from tasks.power.power import Power
 from tasks.power.policy import SupportDemand
-from tasks.daily.training import SUPPORT_TASK, MATERIAL_TASK, can_complete, needs_action
+from tasks.daily.training import SUPPORT_TASK, MATERIAL_TASK, DailyTrainingError, can_complete, needs_action
 from tasks.reward.quest import Quest
 from tasks.daily.himekotry import HimekoTry
 from tasks.weekly.echoofwar import Echoofwar
@@ -23,12 +27,23 @@ from tasks.daily.redemption import Redemption
 from tasks.daily.ember_exchange import EmberExchange
 
 
+def _run_desktop_extra(name, action):
+    if sys.platform != "win32" or (get_control_backend(cfg) == "cloud" and cloud_game.is_headless()):
+        log.info(f"当前环境不支持{name}，本轮跳过")
+        return
+    return action()
+
+
 class Daily:
     @staticmethod
     def support_demand(*, full_run=False):
         if not can_complete(cfg, full_run=full_run) or not cfg.borrow_enable or cfg.borrow_character_enable:
             return SupportDemand()
-        activity, tasks, _ = Quest.scan(collect=False)
+        try:
+            activity, tasks, _ = Quest.scan(collect=False)
+        except DailyTrainingError as error:
+            log.warning(f"未能查询支援实训，本轮继续处理副本：{error}")
+            return SupportDemand()
         return SupportDemand(needs_action(activity, tasks) and tasks.get(SUPPORT_TASK, False))
 
     @staticmethod
@@ -62,6 +77,13 @@ class Daily:
     def routine():
         return run_steps((
             ("日常准备", lambda: Daily.prepare_daily(ignore_refresh=True)),
+            ("日常领奖", reward.start),
+            ("每日实训", Daily.run),
+        ))
+
+    @staticmethod
+    def run_standalone():
+        return run_steps((
             ("日常领奖", reward.start),
             ("每日实训", Daily.run),
         ))
@@ -114,7 +136,7 @@ class Daily:
             steps.append(("差分宇宙积分奖励", Daily._run_weekly_divergent))
 
         if cfg.fight_enable and Date.is_next_x_am(cfg.fight_timestamp, cfg.refresh_hour):
-            steps.append(("锄大地", Fight.start))
+            steps.append(("锄大地", lambda: _run_desktop_extra("锄大地", Fight.start)))
 
         if cfg.universe_enable:
             due = Date.is_next_mon_x_am if cfg.universe_frequency == "weekly" else Date.is_next_x_am
@@ -122,7 +144,7 @@ class Daily:
                 if cfg.universe_category == "divergent":
                     steps.append(("差分宇宙固定次数", lambda: Daily._run_scheduled_divergent_universe(DivergentUniverse())))
                 else:
-                    steps.append(("模拟宇宙", Universe.start))
+                    steps.append(("模拟宇宙", lambda: _run_desktop_extra("模拟宇宙", Universe.start)))
 
         for name, mode, enabled, timestamp in (
             ("混沌回忆", "memoryofchaos", cfg.forgottenhall_enable, cfg.forgottenhall_timestamp),
@@ -149,8 +171,8 @@ class Daily:
         for _ in range(3):
             if divergent.check_divergent_universe_score():
                 return True
-            if divergent.start() is False:
-                return False
+            # 未完成对局也可能结算本周积分。按周奖励状态判断是否继续补打。
+            divergent.start()
             if not Date.is_next_mon_x_am(cfg.weekly_divergent_timestamp, cfg.refresh_hour):
                 return True
         log.warning("尝试运行了多轮差分宇宙，但积分奖励仍未完成")

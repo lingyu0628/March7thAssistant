@@ -11,6 +11,7 @@ import time
 import io
 import ctypes
 import socket
+from subprocess import TimeoutExpired
 from PIL import Image
 from urllib3.exceptions import TimeoutError as TransportTimeoutError
 from selenium import webdriver
@@ -29,12 +30,12 @@ from selenium.webdriver.remote.command import Command
 from selenium.common.exceptions import WebDriverException
 
 from module.config import Config
-from module.config.platform import get_control_backend
 from module.game.base import FrameCapture, GameControllerBase
 from module.logger import Logger
 # from utils.encryption import wdp_encrypt, wdp_decrypt
 
 from utils.console import is_docker_started
+from utils.pause import pause_ctl
 
 
 class CloudGameLoginTimeoutError(RuntimeError):
@@ -45,10 +46,44 @@ class CloudGameZeroDurationError(RuntimeError):
     """云游戏剩余时长为 0。"""
 
 
+class CloudGameQueueTimeoutError(RuntimeError):
+    """当前云游戏队列已达到配置的等待时限。"""
+
+
+class CloudGameDisconnectedError(ConnectionError):
+    """正在运行的浏览器显示云游戏连接中断。"""
+
+
+class CloudGameProbeUnready(ConnectionError):
+    """读取云游戏会话时页面节点已更新，需要从新页面重新确认。"""
+
+
+class CloudGamePaidTimeExhaustedError(SystemExit):
+    """对局中的付费时长已耗尽，由 CLI 记录为明确的结束原因。"""
+
+
 class CloudGameController(GameControllerBase):
+    _exit_cleanup_registered = False
     COOKIE_PATH = "settings/cookies.enc"          # Cookies 保存地址（仅用于调试）
     GAME_URL = "https://sr.mihoyo.com/cloud"            # 游戏地址
     BROWSER_TAG = "--march-7th-assistant-sr-cloud-game"  # 自定义浏览器参数作为标识，用于识别哪些浏览器进程属于三月七小助手
+    QUEUE_STATES = frozenset(("game_running", "in_queue", "select_queue"))
+    LOBBY_STATES = frozenset(("lobby", "signed_in_lobby"))
+    _ENTRY_STATE_SCRIPT = """
+        const visible = el => el && el.getClientRects().length && getComputedStyle(el).visibility === 'visible';
+        const hasVisible = selector => Array.from(document.querySelectorAll(selector)).some(visible);
+        const entryState = () => {
+            if (hasVisible('.game-player')) return "game_running";
+            if (hasVisible("[aria-labelledby*='请选择排队队列']")) return "select_queue";
+            if (hasVisible("[class*='waiting-in-queue']")) return "in_queue";
+            if (hasVisible('#mihoyo-login-platform-iframe')) return "login";
+            const signedIn = hasVisible('div.user-aid.wel-card__aid');
+            const enterAvailable = hasVisible('div.wel-card__content--start');
+            if (signedIn && enterAvailable) return "signed_in_lobby";
+            if (signedIn || enterAvailable) return "lobby";
+            return null;
+        };
+    """
     BROWSER_INSTALL_PATH = os.path.join(os.getcwd(), "3rdparty", "WebBrowser")  # 浏览器安装路径
     INTEGRATED_BROWSER_VERSION = "140.0.7339.207"      # 浏览器版本
     DISABLE_POINTER_LOCK_SCRIPT = """
@@ -145,6 +180,9 @@ class CloudGameController(GameControllerBase):
         self.cfg = cfg
         self.logger = logger
         self._headless_override = None
+        self._preserve_browser_on_exit = True
+        self._queue_deadline = None
+        self._entry_request = None
 
         self._last_interruption_check_time = 0.0
 
@@ -155,27 +193,26 @@ class CloudGameController(GameControllerBase):
         self._qr_notify_last_sent_ts = 0.0
         self._qr_notify_min_interval_sec = 60
 
-        if get_control_backend(cfg) != "adb":
-            atexit.register(self._clean_at_exit)
-
     def _wait_game_page_loaded(self, timeout=30) -> None:
         """等待云崩铁网页加载出来，这里以背景图是否加载出来为准"""
         if not self.driver:
             return
+
+        def background_loaded(driver):
+            pause_ctl.checkpoint()
+            return driver.execute_script("""
+                const img = document.querySelector('#app > div.home-wrapper > picture > img');
+                if (!img) return false;
+                return img && img.complete && img.naturalWidth > 0;
+            """)
+
         for retry in range(self.MAX_RETRIES + 1):
+            pause_ctl.checkpoint()
             if retry > 0:
                 self.log_warning(f"页面加载超时，正在刷新重试... ({retry}/{self.MAX_RETRIES})")
                 self.driver.refresh()
             try:
-                WebDriverWait(self.driver, timeout).until(
-                    lambda d: d.execute_script(
-                        """
-                        const img = document.querySelector('#app > div.home-wrapper > picture > img');
-                        if (!img) return false;
-                        return img && img.complete && img.naturalWidth > 0;
-                        """
-                    )
-                )
+                WebDriverWait(self.driver, timeout).until(background_loaded)
                 return
             except TimeoutException:
                 pass
@@ -352,20 +389,24 @@ class CloudGameController(GameControllerBase):
         args.extend(self.cfg.browser_launch_argument)  # 用户自定义参数
         return args
 
-    def _connect_or_create_browser(self, headless=False, *, connect_only=False) -> None:
-        """连接小助手的浏览器；connect_only 时不启动、关闭或重建浏览器。"""
-        if connect_only:
-            existing = self.get_m7a_browsers()
-            if not existing:
-                raise ConnectionError("未检测到正在运行的云游戏浏览器，请先启动游戏")
-            # “启动游戏”可以临时使用有窗口模式，连接时应遵循实际进程而非配置。
-            headless = "--headless=new" in existing[0].cmdline()
-            self._headless_override = headless
+    def _connect_or_create_browser(self, headless=False, *, connect_only=False, preserve_existing=False) -> bool:
+        """连接或创建小助手的浏览器，返回是否连接了已有浏览器。"""
+        keep_existing = connect_only or preserve_existing
+        existing = self.get_m7a_browsers() if connect_only else []
+        if connect_only and not existing:
+            raise ConnectionError("未检测到正在运行的云游戏浏览器，请先启动游戏")
 
         browser_type = "chrome" if self.cfg.browser_type in ["integrated", "chrome"] else "edge" if self.cfg.browser_type == "edge" else "chromium"
         integrated = self.cfg.browser_type == "integrated"
         first_run = False
         browser_path, driver_path = self._prepare_browser_and_driver(browser_type, integrated)
+        pause_ctl.checkpoint()
+        if preserve_existing:
+            existing = self.get_m7a_browsers()
+        if existing:
+            # 当前浏览器可能使用了临时窗口模式，连接时遵循实际进程。
+            headless = "--headless=new" in existing[0].cmdline()
+            self._headless_override = headless
 
         # 端口可用性检测：若配置端口被占，递增找一个空闲端口
         try:
@@ -375,7 +416,7 @@ class CloudGameController(GameControllerBase):
         if not 1 <= configured_port <= 65535:
             raise RuntimeError(f"browser_debug_port 超出有效范围: {configured_port}")
         actual_port = configured_port
-        bind_error = None if connect_only else self._get_port_bind_error(configured_port)
+        bind_error = None if existing else self._get_port_bind_error(configured_port)
         if bind_error is not None:
             self.log_warning(
                 f"端口 {configured_port} 无法绑定（{bind_error}），正在查找可用端口..."
@@ -407,8 +448,13 @@ class CloudGameController(GameControllerBase):
         except AttributeError:
             self._driver_pid = None
 
+        if not self._exit_cleanup_registered:
+            atexit.register(self._clean_at_exit)
+            self._exit_cleanup_registered = True
+
         # 关掉 headless 不匹配的浏览器，防止端口冲突
-        if not connect_only:
+        if not keep_existing:
+            self._preserve_browser_on_exit = False
             if self.close_all_m7a_browser(headless=not headless):
                 self.log_info(f"已关闭正在运行的{'前台' if headless else '后台'}浏览器")
             existing = self.get_m7a_browsers(headless=headless)
@@ -417,12 +463,14 @@ class CloudGameController(GameControllerBase):
             reconnect_port = self._get_debug_port_from_cmdline(existing[0]) or configured_port
             try:
                 options.debugger_address = f"127.0.0.1:{reconnect_port}"
+                pause_ctl.checkpoint()
                 self.driver = webdriver_type(service=service, options=options)
+                pause_ctl.checkpoint()
                 self._configure_pointer_lock(headless)
                 self.log_info("已连接到现有浏览器")
-                return
+                return True
             except Exception:
-                if connect_only:
+                if keep_existing:
                     raise
                 self.log_info("连接现有浏览器失败")
                 self.close_all_m7a_browser()
@@ -461,6 +509,7 @@ class CloudGameController(GameControllerBase):
 
         try:
             self.log_debug("启动浏览器中...")
+            pause_ctl.checkpoint()
             self.driver = webdriver_type(service=service, options=options)
             self.log_debug("浏览器启动成功")
         except SessionNotCreatedException as e:
@@ -483,6 +532,7 @@ class CloudGameController(GameControllerBase):
             self.log_error(f"浏览器启动失败: {e}")
             raise RuntimeError("浏览器启动失败")
 
+        pause_ctl.checkpoint()
         self._configure_pointer_lock(headless)
         if not self.cfg.cloud_game_fullscreen_enable:
             self.driver.set_window_size(1920, 1120)
@@ -492,7 +542,9 @@ class CloudGameController(GameControllerBase):
             self.change_auto_battle(True)
         if self.cfg.browser_dump_cookies_enable:
             self._load_cookies()
+        pause_ctl.checkpoint()
         self._refresh_page()
+        return False
 
     def _restart_browser(self, headless=False) -> None:
         """重启浏览器"""
@@ -640,31 +692,109 @@ class CloudGameController(GameControllerBase):
         raise CloudGameLoginTimeoutError(message)
 
     def _check_login_timeout(self, deadline: float, timeout_seconds: int) -> None:
+        pause_ctl.check_stop()
         if time.monotonic() >= deadline:
             self._abort_login_timeout(timeout_seconds)
 
-    def _click_enter_game(self, timeout=5) -> None:
+    def _read_entry_state(self) -> str | None:
+        pause_ctl.checkpoint()
+        if not self.driver:
+            return None
+        client_config = self.driver.command_executor._client_config
+        previous_timeout = client_config.timeout
+        client_config.timeout = min(previous_timeout, 3) if previous_timeout is not None else 3
+        try:
+            return self.driver.execute_script(self._ENTRY_STATE_SCRIPT + "return entryState();")
+        except (TransportTimeoutError, TimeoutException) as error:
+            raise CloudGameProbeUnready("云游戏入口状态读取超时") from error
+        finally:
+            client_config.timeout = previous_timeout
+
+    def _can_continue_queue_selection(self) -> bool:
+        return self._entry_request == "sent" and self._queue_deadline is not None
+
+    def startup_entry(self, *, disconnected=False) -> str | None:
+        # 已尝试入场或看到过队列时，回到大厅的瞬间无法证明原请求没有生效。
+        entry_pending = self._entry_request is not None or self._queue_deadline is not None
+        if not disconnected and not entry_pending and not self._preserve_browser_on_exit:
+            return "enter"
+        state = self._read_entry_state()
+        if state == "in_queue" or (state == "select_queue" and self._can_continue_queue_selection()):
+            return "resume_queue"
+        if disconnected:
+            return "signed_in_lobby" if not entry_pending and state == "signed_in_lobby" else None
+        if state == "select_queue" or not entry_pending and state in self.LOBBY_STATES | {"login"}:
+            return "enter"
+        return None
+
+    def _click_lobby_button(self, button, *, signed_in_lobby_only):
+        if not signed_in_lobby_only:
+            self.driver.execute_script("arguments[0].click();", button)
+            return True
+        # 暂停恢复或 DOM 更新可能使旧大厅失效。重入时在浏览器内确认页面和派发输入。
+        return self.driver.execute_script(self._ENTRY_STATE_SCRIPT + """
+            const state = entryState();
+            if (state === "game_running") return state;
+            const button = arguments[0];
+            if (state !== "signed_in_lobby" || !button.isConnected || !visible(button)) return false;
+            button.click();
+            return true;
+        """, button)
+
+    def _click_enter_game(self, timeout=5, *, signed_in_lobby_only=False) -> bool | str:
         """
         点击‘进入游戏’按钮。
         """
+        pause_ctl.checkpoint()
         if not self.driver:
-            return
+            return False
 
-        game_selector = ".game-player"
+        lobby_states = {"signed_in_lobby"} if signed_in_lobby_only else self.LOBBY_STATES
         guide_close_selector = "div.guide-close-btn__x"
         enter_button_selector = "div.wel-card__content--start"
         try:
-            if self.driver.find_elements(By.CSS_SELECTOR, game_selector):
-                self.log_info("已在游戏中")
-                return
-            guide_close_btn = self.driver.find_elements(By.CSS_SELECTOR, guide_close_selector)
-            if guide_close_btn:
-                # 先关闭 “保存网页地址，下次可一键游玩” 引导弹窗，避免遮挡后续游戏画面
-                self.driver.execute_script("arguments[0].click();", guide_close_btn[0])
-            enter_button = WebDriverWait(self.driver, timeout).until(
-                EC.visibility_of_element_located((By.CSS_SELECTOR, enter_button_selector))
-            )
-            self.driver.execute_script("arguments[0].click();", enter_button)
+            if self._read_entry_state() in lobby_states:
+                guide_close_btn = self.driver.find_elements(By.CSS_SELECTOR, guide_close_selector)
+                if guide_close_btn and self._read_entry_state() in lobby_states:
+                    # 先关闭 “保存网页地址，下次可一键游玩” 引导弹窗，避免遮挡后续游戏画面。
+                    pause_ctl.checkpoint()
+                    self._click_lobby_button(guide_close_btn[0], signed_in_lobby_only=signed_in_lobby_only)
+            enter_visible = EC.visibility_of_element_located((By.CSS_SELECTOR, enter_button_selector))
+
+            def find_enter_button(driver):
+                pause_ctl.checkpoint()
+                state = self._read_entry_state()
+                if state in self.QUEUE_STATES:
+                    return state
+                if state in lobby_states:
+                    return enter_visible(driver)
+                return False
+
+            enter_button = WebDriverWait(self.driver, timeout).until(find_enter_button)
+            if isinstance(enter_button, str):
+                return "game_running" if signed_in_lobby_only and enter_button == "game_running" else False
+            state = self._read_entry_state()
+            if state in self.QUEUE_STATES:
+                return "game_running" if signed_in_lobby_only and state == "game_running" else False
+            if state not in lobby_states:
+                raise CloudGameProbeUnready("点击进入前无法确认仍在云游戏大厅")
+            pause_ctl.checkpoint()
+            self._entry_request = "pending"
+            self._queue_deadline = None
+            try:
+                dispatched = self._click_lobby_button(enter_button, signed_in_lobby_only=signed_in_lobby_only)
+            except StaleElementReferenceException:
+                # WebDriver 无法解析旧按钮时未执行脚本，可以用新画面重试。
+                self._entry_request = None
+                raise
+            if dispatched == "game_running":
+                self._entry_request = None
+                return dispatched
+            if not dispatched:
+                self._entry_request = None
+                raise CloudGameProbeUnready("点击进入时已离开已登录的云游戏大厅")
+            self._entry_request = "sent"
+            return True
         except Exception as e:
             self.log_error(f"点击进入游戏按钮游戏异常: {e}")
             raise e
@@ -687,25 +817,32 @@ class CloudGameController(GameControllerBase):
             self.log_warning("等待游戏画面加载超时，继续尝试")
             return False
 
-    def _wait_in_queue(self, timeout=600) -> bool:
+    def reset_queue_wait(self) -> None:
+        self._queue_deadline = None
+        self._entry_request = None
+        self._paid_time = 0
+
+    def _wait_in_queue(self, timeout=600, *, resume_queue=False) -> bool:
         """排队等待进入"""
-        in_queue_selector = "[class*='waiting-in-queue']"
-        cloud_game_selector = ".game-player"
-        select_queue_selector = "[aria-labelledby*='请选择排队队列']"
+        if self._queue_deadline is None:
+            self._queue_deadline = time.monotonic() + timeout
+
+        queue_states = ("in_queue", "game_running") if resume_queue else self.QUEUE_STATES
+
+        def queue_status(_):
+            pause_ctl.checkpoint()
+            state = self._read_entry_state()
+            return state if state in queue_states else None
 
         try:
             # 检查是否需要排队
-            status = WebDriverWait(self.driver, 10).until(
-                lambda d: d.execute_script("""
-                    if (document.querySelector(arguments[0])) return "game_running";
-                    else if (document.querySelector(arguments[1])) return "in_queue";
-                    else if (document.querySelector(arguments[2])) return "select_queue";
-                    else return null;
-                """, cloud_game_selector, in_queue_selector, select_queue_selector)
-            )
+            status = WebDriverWait(self.driver, 10).until(queue_status)
 
             select_retries = 0
             while status == "select_queue":
+                pause_ctl.checkpoint()
+                if time.monotonic() >= self._queue_deadline:
+                    raise CloudGameQueueTimeoutError("云游戏排队已达到等待时限")
                 select_retries += 1
                 if select_retries >= 5:
                     self.log_error("选择排队队列超时")
@@ -713,69 +850,69 @@ class CloudGameController(GameControllerBase):
 
                 if self.cfg.cloud_game_use_paid_time and getattr(self, '_paid_time', 0) > 0:
                     self.log_info("检测到选择排队队列界面，配置开启了使用付费时间，选择快速队列")
-                    self.driver.execute_script("""
-                        try {
-                            document.getElementsByClassName("coin-prior-choose-item-include-info")[0].click();
-                        } catch(e) {}
-                    """)
+                    queue_index = 0
                 else:
                     if self.cfg.cloud_game_use_paid_time:
-                        # self.cfg.cloud_game_use_paid_time = False
                         self.log_warning("当前账号付费时间不足，已切换为免费时间。")
                     self.log_info("检测到选择排队队列界面，选择普通队列")
-                    self.driver.execute_script("""
-                        try {
-                            document.getElementsByClassName("coin-prior-choose-item-include-info")[1].click();
-                        } catch(e) {}
-                    """)
+                    queue_index = 1
+                pause_ctl.checkpoint()
+                if self._entry_request == "sent":
+                    # 入场成功可以接续选队列，选择回执丢失后只观察队列或播放器。
+                    self._entry_request = "pending"
+                self.driver.execute_script("""
+                    const dialog = Array.from(document.querySelectorAll("[aria-labelledby*='请选择排队队列']"))
+                        .find(el => el.getClientRects().length && getComputedStyle(el).visibility === 'visible');
+                    dialog?.getElementsByClassName("coin-prior-choose-item-include-info")[arguments[0]]?.click();
+                """, queue_index)
                 time.sleep(2)
-                status = WebDriverWait(self.driver, 10).until(
-                    lambda d: d.execute_script("""
-                        if (document.querySelector(arguments[0])) return "game_running";
-                        else if (document.querySelector(arguments[1])) return "in_queue";
-                        else if (document.querySelector(arguments[2])) return "select_queue";
-                        else return null;
-                    """, cloud_game_selector, in_queue_selector, select_queue_selector)
-                )
+                status = WebDriverWait(self.driver, 10).until(queue_status)
 
+            pause_ctl.checkpoint()
             if status == "game_running":
                 self.log_info("游戏已启动，无需排队，等待游戏画面加载...")
                 self._wait_game_canvas_ready()
                 return True
             elif status == "in_queue":
+                if self._entry_request == "sent":
+                    self._entry_request = "pending"
                 self.log_info("正在排队...")
                 last_wait_time = None
                 poll_interval = 5  # 每5秒检测一次
-                start_time = time.monotonic()
-                while time.monotonic() - start_time < timeout:
-                    # 检查是否已退出排队
-                    if not self.driver.find_elements(By.CSS_SELECTOR, in_queue_selector):
+                while time.monotonic() < self._queue_deadline:
+                    pause_ctl.checkpoint()
+                    state = self._read_entry_state()
+                    if state == "game_running":
+                        pause_ctl.checkpoint()
                         self.log_info("排队成功，等待游戏画面加载...")
                         self._wait_game_canvas_ready()
                         return True
-                    # 检测预计等待时间
-                    wait_time = self.driver.execute_script("""
-                        // 方式1: "预估排队时间30分钟以上，建议开拓者错峰进行游戏~"
-                        var timeHide = document.querySelector('.time-hide__text');
-                        if (timeHide && timeHide.textContent) {
-                            return timeHide.textContent.trim();
-                        }
-                        // 方式2: "预计等待时间 10~20 分钟"
-                        var singleRow = document.querySelector('.single-row');
-                        if (singleRow) {
-                            var valEl = singleRow.querySelector('.single-row__val');
-                            if (valEl && valEl.textContent) {
-                                return '预计等待时间: ' + valEl.textContent.replace(/\\s+/g, '').trim();
+                    if state == "in_queue":
+                        # 检测预计等待时间
+                        wait_time = self.driver.execute_script("""
+                            // 方式1: "预估排队时间30分钟以上，建议开拓者错峰进行游戏~"
+                            var timeHide = document.querySelector('.time-hide__text');
+                            if (timeHide && timeHide.textContent) {
+                                return timeHide.textContent.trim();
                             }
-                        }
-                        return null;
-                    """)
-                    if wait_time and wait_time != last_wait_time:
-                        self.log_info(f"当前状态: {wait_time}")
-                        last_wait_time = wait_time
-                    time.sleep(poll_interval)
-                self.log_error("排队超时")
-                return False
+                            // 方式2: "预计等待时间 10~20 分钟"
+                            var singleRow = document.querySelector('.single-row');
+                            if (singleRow) {
+                                var valEl = singleRow.querySelector('.single-row__val');
+                                if (valEl && valEl.textContent) {
+                                    return '预计等待时间: ' + valEl.textContent.replace(/\\s+/g, '').trim();
+                                }
+                            }
+                            return null;
+                        """)
+                        if wait_time and wait_time != last_wait_time:
+                            self.log_info(f"当前状态: {wait_time}")
+                            last_wait_time = wait_time
+                    time.sleep(max(0, min(poll_interval, self._queue_deadline - time.monotonic())))
+                pause_ctl.check_stop()
+                raise CloudGameQueueTimeoutError("云游戏排队已达到等待时限")
+        except CloudGameQueueTimeoutError:
+            raise
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -816,10 +953,13 @@ class CloudGameController(GameControllerBase):
                 level=NotificationLevel.ERROR,
             )
             self.stop_game()
-            raise SystemExit("云游戏付费时长已耗尽，游戏中断")
+            raise CloudGamePaidTimeExhaustedError("云游戏付费时长已耗尽，游戏中断")
 
     def _clean_at_exit(self) -> None:
-        """当脚本退出时，关闭所有 headless 浏览器"""
+        """关闭本次启动模式对应的后台浏览器，独立接管只释放驱动。"""
+        if self._preserve_browser_on_exit:
+            self._release_attached_driver()
+            return
         if self.close_all_m7a_browser(headless=True):
             self.log_info("已关闭所有后台浏览器")
 
@@ -986,6 +1126,7 @@ class CloudGameController(GameControllerBase):
             EC.element_to_be_clickable((By.CSS_SELECTOR, "div.qr-login-btn"))
         )
         try:
+            pause_ctl.checkpoint()
             qr_login_button.click()
             time.sleep(0.5)
         except Exception as click_err:
@@ -1140,6 +1281,7 @@ class CloudGameController(GameControllerBase):
         import os
         check_interval = 2
         while True:
+            pause_ctl.checkpoint()
             if login_deadline is not None and timeout_seconds is not None:
                 self._check_login_timeout(login_deadline, timeout_seconds)
 
@@ -1160,6 +1302,7 @@ class CloudGameController(GameControllerBase):
                 self.log_warning("二维码已过期，正在刷新...")
                 try:
                     qr_wrap = self.driver.find_element(By.CSS_SELECTOR, "div.qr-wrap")
+                    pause_ctl.checkpoint()
                     qr_wrap.click()
                     time.sleep(1)
 
@@ -1225,21 +1368,33 @@ class CloudGameController(GameControllerBase):
             except Exception as switch_err:
                 self.log_warning(f"切回主文档失败: {switch_err}")
 
-    def start_game_process(self, headless=None) -> bool:
+    def start_game_process(self, headless=None, *, preserve_existing=False) -> bool:
         """启动浏览器进程"""
+        pause_ctl.checkpoint()
+        self._preserve_browser_on_exit = preserve_existing
         try:
             self._headless_override = headless
             if headless is None:
                 headless = self.cfg.browser_headless_enable
-            self._connect_or_create_browser(headless=headless)
+            if preserve_existing:
+                self._release_attached_driver()
+                attached = self._connect_or_create_browser(headless=headless, preserve_existing=True)
+            else:
+                attached = self._connect_or_create_browser(headless=headless)
+            pause_ctl.checkpoint()
             self._confirm_viewport_resolution()
+            self._preserve_browser_on_exit = preserve_existing and attached
             return True
         except Exception as e:
+            if preserve_existing:
+                self._release_attached_driver()
+                raise
             self.log_error(f"启动或连接浏览器失败 {e}")
             return False
 
     def connect_to_running_game(self) -> bool:
         """为独立运行的流程连接已有云游戏会话，不启动游戏或重新排队。"""
+        self.preserve_running_browser()
         try:
             if self.driver is None:
                 self._connect_or_create_browser(connect_only=True)
@@ -1248,9 +1403,31 @@ class CloudGameController(GameControllerBase):
                 self.log_error("云游戏尚未进入游戏画面，请先启动游戏")
                 return False
             return True
+        except (CloudGameDisconnectedError, CloudGameProbeUnready) as e:
+            self.log_warning(str(e))
+            return False
         except Exception as e:
             self.log_error(f"连接正在运行的云游戏失败: {e}")
+            self._release_attached_driver()
             return False
+
+    def preserve_running_browser(self):
+        """保留游戏浏览器，退出时仅释放当前驱动。"""
+        self._preserve_browser_on_exit = True
+
+    def _release_attached_driver(self):
+        driver, self.driver = self.driver, None
+        process = getattr(getattr(driver, "service", None), "process", None)
+        # WebDriver quit 会向已接管的会话发命令。只结束本进程启动的驱动服务。
+        try:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except TimeoutExpired:
+                    process.kill()
+        except OSError as error:
+            self.log_debug(f"释放云游戏连接驱动失败：{error}")
 
     def is_headless(self) -> bool:
         """返回本次启动选用的模式，未指定覆盖时遵循配置。"""
@@ -1261,30 +1438,64 @@ class CloudGameController(GameControllerBase):
     def is_in_game(self) -> bool:
         if not self.driver:
             return False
-        # 断联后播放器节点仍然存在，不能据此跳过重新连接。
-        # 启动流程捕获 ConnectionError 后会关闭失效会话并按原有上限重试。
-        disconnected = self.driver.find_elements(
-            By.XPATH, "//*[normalize-space(text())='连接中断']")
-        exit_buttons = self.driver.find_elements(
-            By.XPATH, "//*[normalize-space(text())='退出游戏']")
-        if (any(element.is_displayed() for element in disconnected)
-                and any(element.is_displayed() for element in exit_buttons)):
-            raise ConnectionError("云游戏会话已断开，重新连接游戏")
-        return any(element.is_displayed() for element in
-                   self.driver.find_elements(By.CSS_SELECTOR, ".game-player"))
-
-    def enter_cloud_game(self) -> bool:
-        """进入云游戏"""
+        client_config = self.driver.command_executor._client_config
+        previous_timeout = client_config.timeout
+        client_config.timeout = min(previous_timeout, 3) if previous_timeout is not None else 3
         try:
+            # 断联后播放器节点仍然存在，不能据此跳过重新连接。
+            disconnected = self.driver.find_elements(
+                By.XPATH, "//*[normalize-space(text())='连接中断']")
+            if any(element.is_displayed() for element in disconnected):
+                exit_buttons = self.driver.find_elements(
+                    By.XPATH, "//*[normalize-space(text())='退出游戏']")
+                if any(element.is_displayed() for element in exit_buttons):
+                    raise CloudGameDisconnectedError("云游戏会话已断开")
+            return any(element.is_displayed() for element in
+                       self.driver.find_elements(By.CSS_SELECTOR, ".game-player"))
+        except StaleElementReferenceException as error:
+            raise CloudGameProbeUnready("云游戏页面正在更新，暂未确认会话状态") from error
+        except (TransportTimeoutError, TimeoutException) as error:
+            raise TimeoutError("读取云游戏会话状态超时") from error
+        finally:
+            client_config.timeout = previous_timeout
+
+    def enter_cloud_game(self, *, resume_queue=False, signed_in_lobby_only=False) -> bool | str:
+        """进入云游戏；重入前播放器恢复时返回 game_running。"""
+        try:
+            if resume_queue:
+                return self._finish_cloud_entry(resume_queue=not self._can_continue_queue_selection())
+            entry = self._read_entry_state()
+            if signed_in_lobby_only and entry != "signed_in_lobby":
+                if entry == "game_running":
+                    return entry
+                if entry == "in_queue":
+                    return self._finish_cloud_entry(resume_queue=True)
+                raise CloudGameProbeUnready("重入前无法确认已登录的云游戏大厅")
+            if entry == "select_queue" and self.cfg.cloud_game_use_paid_time:
+                paid, _ = self._get_remaining_playtime()
+                if paid is not None:
+                    self._paid_time = paid
+            if entry in self.QUEUE_STATES:
+                return self._finish_cloud_entry()
             # 检测登录状态
-            while not self._check_login():
+            while not signed_in_lobby_only:
+                pause_ctl.checkpoint()
+                logged_in = self._check_login()
+                pause_ctl.checkpoint()
+                if logged_in:
+                    break
+                if logged_in is None and self._preserve_browser_on_exit:
+                    raise CloudGameProbeUnready("未确认云游戏登录状态，等待重新读取")
                 login_timeout_seconds = self._get_login_timeout_seconds()
                 login_deadline = time.monotonic() + login_timeout_seconds
                 self.log_info("未登录")
 
                 # 如果是 headless 且配置了自动重启，则以非 headless 模式重启启动让用户登录
                 if self.is_headless() and self.cfg.browser_headless_restart_on_not_logged_in:
+                    if self._preserve_browser_on_exit and self._read_entry_state() != "login":
+                        raise CloudGameProbeUnready("未确认云游戏登录页，保留当前浏览器")
                     self.log_info("无窗口模式下检测到未登录，将以有窗口模式重启浏览器")
+                    pause_ctl.checkpoint()
                     self._restart_browser(headless=False)
 
                 # 如果是 headless 且配置了不重启，则尝试二维码登录
@@ -1307,6 +1518,7 @@ class CloudGameController(GameControllerBase):
                     if self.cfg.browser_dump_cookies_enable:
                         self._save_cookies()
                     self.log_info("登录完成，将重启为无窗口模式")
+                    pause_ctl.checkpoint()
                     self._restart_browser(headless=True)
 
             if self.cfg.browser_dump_cookies_enable:
@@ -1316,43 +1528,50 @@ class CloudGameController(GameControllerBase):
             self.log_info("正在检测云游戏剩余时长...")
             paid, free = None, None
             for _ in range(5):
+                pause_ctl.checkpoint()
                 paid, free = self._get_remaining_playtime()
                 if paid is not None or free is not None:
                     break
                 time.sleep(1)
 
+            pause_ctl.checkpoint()
             remaining = (paid or 0) + (free or 0)
             self._paid_time = paid or 0
 
             if paid is None and free is None:
                 self.log_warning("无法识别剩余时长，将继续尝试进入游戏")
-                remaining = None
-                self._click_enter_game()
-                if not self._wait_in_queue(int(self.cfg.cloud_game_max_queue_time) * 60):
-                    return False
-                self._confirm_viewport_resolution()  # 将浏览器内部分辨率设置为 1920x1080
-                self.log_info("进入云游戏成功")
-                return True
             elif remaining == 0:
+                if signed_in_lobby_only:
+                    entry = self._read_entry_state()
+                    if entry == "game_running":
+                        return entry
+                    if entry == "in_queue":
+                        return self._finish_cloud_entry(resume_queue=True)
+                    if entry != "signed_in_lobby":
+                        raise CloudGameProbeUnready("核对剩余时长时已无法确认已登录的云游戏大厅")
                 self.log_error("云游戏剩余时长为 0，停止运行")
+                raise CloudGameZeroDurationError("云游戏剩余时长为 0，停止运行")
             else:
                 self.log_info(f"云游戏剩余时长：{remaining} 分钟（付费：{paid or 0} 分钟，免费：{free or 0} 分钟）")
-                self._click_enter_game()
-                if not self._wait_in_queue(int(self.cfg.cloud_game_max_queue_time) * 60):
-                    return False
-                self._confirm_viewport_resolution()  # 将浏览器内部分辨率设置为 1920x1080
-                self.log_info("进入云游戏成功")
-                return True
-        except CloudGameLoginTimeoutError:
+            entered = self._click_enter_game(signed_in_lobby_only=signed_in_lobby_only)
+            if entered == "game_running":
+                return entered
+            return self._finish_cloud_entry(resume_queue=signed_in_lobby_only and not entered)
+        except (CloudGameLoginTimeoutError, CloudGameQueueTimeoutError, CloudGameZeroDurationError):
             raise
         except Exception as e:
             self.try_dump_page()
             self.log_error(f"进入云游戏失败: {e}")
             return False
 
-        if remaining == 0:
-            raise CloudGameZeroDurationError("云游戏剩余时长为 0，停止运行")
-        return False
+    def _finish_cloud_entry(self, *, resume_queue=False) -> bool:
+        if not self._wait_in_queue(int(self.cfg.cloud_game_max_queue_time) * 60, resume_queue=resume_queue):
+            return False
+        pause_ctl.checkpoint()
+        self._queue_deadline = None
+        self._confirm_viewport_resolution()  # 将浏览器内部分辨率设置为 1920x1080
+        self.log_info("进入云游戏成功")
+        return True
 
     def _take_video_screenshot(self, crop=(0, 0, 1, 1)) -> tuple[bytes, tuple[int, int]] | None:
         """直接从云游戏画面元素抓取当前帧，避免整页截图开销。"""
@@ -1887,4 +2106,5 @@ class CloudGameController(GameControllerBase):
             self.log_warning(f"检测到由小助手启动的浏览器，关闭失败: {e}")
             return False
 
+        self._preserve_browser_on_exit = True
         return True

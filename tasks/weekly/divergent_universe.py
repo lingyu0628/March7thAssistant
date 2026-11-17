@@ -2,6 +2,7 @@ from utils.game_options import game_option_enabled
 from module.screen import screen
 from module.automation import auto
 from module.config import cfg
+from module.config.platform import get_control_backend
 from module.logger import log
 from module.automation.screenshot import Screenshot
 from module.notification.notification import NotificationLevel
@@ -147,35 +148,7 @@ class DivergentUniverse:
         return False
 
     def process_ornament(self):
-        screen.change_to("guide3")
-
-        immersifier_crop = (1623.0 / 1920, 40.0 / 1080, 162.0 / 1920, 52.0 / 1080)
-        text = auto.get_single_line_text(crop=immersifier_crop, blacklist=['+', '米'], max_retries=3)
-        if "/12" not in text:
-            log.error("沉浸器数量识别失败")
-            return
-
-        immersifier_count = int(text.split("/")[0])
-        log.info(f"沉浸器: {immersifier_count}/12")
-        if immersifier_count > 0:
-            instance_name = cfg.instance_names["饰品提取"]
-
-            # 使用培养目标的副本配置（如果启用）
-            try:
-                if cfg.build_target_enable:
-                    from tasks.daily.buildtarget import BuildTarget
-                    target_instances = BuildTarget.get_target_instances()
-
-                    for target_type, target_name in target_instances:
-                        # 精确匹配副本类型
-                        if target_type == "饰品提取":
-                            log.info(f"使用培养目标副本: {target_name}")
-                            instance_name = target_name
-                            break
-            except Exception as e:
-                log.error(f"获取培养目标副本失败: {e}")
-
-            Power.process("饰品提取", instance_name, immersifier_only=True)
+        Power.process_immersifier_only()
 
     def start_war(self, type: Literal["normal", "cycle"] = "normal") -> bool:
         log.info("开始「差分宇宙」")
@@ -473,7 +446,7 @@ class DivergentUniverse:
         return width * height
 
     def process_event_stage(self):
-        stable_mode = cfg.cloud_game_enable or cfg.weekly_divergent_stable_mode
+        stable_mode = get_control_backend(cfg) == "cloud" or cfg.weekly_divergent_stable_mode
         window = Screenshot.get_window(cfg.game_title_name)
         win_x, _, width, _ = Screenshot.get_window_region(window)
         screen_center_x = win_x + width // 2
@@ -722,7 +695,7 @@ class DivergentUniverse:
             enemy_crop = (675 / 1920, 41 / 1080, 274 / 1920, 37 / 1080)
             auto.press_key_down("w")
             time.sleep(0.2)
-            if not cfg.cloud_game_enable and not cfg.weekly_divergent_stable_mode:
+            if get_control_backend(cfg) != "cloud" and not cfg.weekly_divergent_stable_mode:
                 auto.press_key_down("shift")
             start_time = time.monotonic()
             while time.monotonic() - start_time < 3:  # 最多等待3秒
@@ -733,7 +706,7 @@ class DivergentUniverse:
                 log.info("未检测到敌对目标")
             time.sleep(0.8)
             auto.press_key_up("w")
-            if not cfg.cloud_game_enable and not cfg.weekly_divergent_stable_mode:
+            if get_control_backend(cfg) != "cloud" and not cfg.weekly_divergent_stable_mode:
                 auto.press_key_up("shift")
 
             if auto.find_element("./assets/images/share/base/F.png", "image", 0.9, crop=(998.0 / 1920, 473.0 / 1080, 392.0 / 1920, 296.0 / 1080)) and auto.find_element(("战利品", "混沌药箱"), "text", crop=(1205 / 1920, 589 / 1080, 193 / 1920, 49 / 1080), include=True):
@@ -985,7 +958,7 @@ class DivergentUniverse:
     def process_random_door(self, stable_mode=False, timeout=15):
         if self.stage_finish:
             return True
-        if cfg.cloud_game_enable or cfg.weekly_divergent_stable_mode:
+        if get_control_backend(cfg) == "cloud" or cfg.weekly_divergent_stable_mode:
             stable_mode = True
         window = Screenshot.get_window(cfg.game_title_name)
         win_x, _, width, _ = Screenshot.get_window_region(window)
@@ -1541,11 +1514,12 @@ class DivergentUniverse:
 
     @staticmethod
     def reveal_event_confirm():
-        for attempt in range(7):
+        max_drags = 2
+        for attempt in range(max_drags + 1):
             # 与后续点击使用相同的识别范围和包含匹配，兼容按钮位置变化及 OCR 合并文字。
             if auto.find_element("确定", "text", max_retries=2, retry_delay=0.5, include=True):
                 return True
-            if attempt == 6:
+            if attempt == max_drags:
                 break
             # 事件背景和选中框有动画。松手前停顿消除惯性，再重新识别按钮，
             # 避免把背景持续变化误判为列表还在移动。

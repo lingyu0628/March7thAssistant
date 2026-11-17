@@ -32,6 +32,7 @@ from module.config import cfg
 from module.localization import tr
 from utils import autostart
 from utils.tasks import AVAILABLE_TASKS, supported_tasks, UNSUPPORTED_TASK
+from app.tools.adb_service import display_connection
 
 
 class AutostartConfigDialog(MessageBoxBase):
@@ -84,7 +85,7 @@ class AutostartConfigDialog(MessageBoxBase):
         self._updateModeVisibility()
 
     def _loadTasks(self, combo, current):
-        for task_id, name in supported_tasks(cfg).items():
+        for task_id, name in supported_tasks(display_connection(cfg)).items():
             combo.addItem(tr(name), userData=task_id)
         if combo.findData(current) < 0:
             name = tr(AVAILABLE_TASKS.get(current, current))
@@ -227,7 +228,7 @@ class AutostartSettingCard(SettingCard):
             self.setValue(not isChecked)
             InfoBar.error(
                 title=tr('开机启动设置失败'),
-                content=tr('请以管理员权限运行后重试'),
+                content=tr('请检查日志后重试') if isChecked else tr('请以管理员权限运行后重试'),
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,

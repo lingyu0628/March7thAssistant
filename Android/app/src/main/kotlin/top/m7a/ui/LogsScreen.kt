@@ -212,7 +212,7 @@ private fun LogLines(shown: List<LogEntry>) {
                 } else {
                     val open = expanded[entry] == true
                     val tint = when (entry.level) {
-                        LogLevel.INFO -> scheme.onSurface
+                        LogLevel.INFO, LogLevel.DEBUG -> scheme.onSurface
                         LogLevel.WARNING -> LocalBrand.current.warning
                         LogLevel.ERROR -> scheme.error
                     }
@@ -355,7 +355,7 @@ private fun HelpList(current: String?, target: String?) {
                 }
                 AnimatedVisibility(open) {
                     Column {
-                        Text(tr(info.advice), Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
+                        Text(info.adviceText(), Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium)
                         Text(
                             tr(R.string.error_code, code), Modifier.padding(top = 6.dp),
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

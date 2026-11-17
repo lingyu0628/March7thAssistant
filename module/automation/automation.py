@@ -19,13 +19,14 @@ from module.game.adb_transport import AdbError
 from module.localization import tr
 from module.ocr import ocr
 from module.config import cfg
-from module.config.platform import TouchProfileInputError, get_control_backend, get_ui_profile
+from module.config.platform import InvalidGameConnection, TouchProfileInputError, get_control_backend, get_ui_profile
 
 
 _screenshot_retry_timeout = ContextVar("screenshot_retry_timeout", default=60.0)
 _TOUCH_UNSUPPORTED_INPUTS = (
     "press_key", "press_key_down", "press_key_up", "secretly_press_key", "press_mouse", "mouse_scroll",
 )
+_INPUT_METHODS = ("mouse_click", "mouse_down", "mouse_up", "mouse_move", "mouse_drag", "secretly_write") + _TOUCH_UNSUPPORTED_INPUTS
 
 
 def _reject_touch_input(name):
@@ -58,10 +59,22 @@ class Automation(metaclass=SingletonMeta):
         self.window_title = window_title
         self.logger = logger
         self.screenshot = None
-        self._init_input()
+        self.input_handler = None
+        self.connection = None
+        try:
+            self._init_input()
+        except InvalidGameConnection:
+            # 设置页可以先打开并修复配置，实际发出输入前仍须解析有效连接。
+            pass
         self.img_cache = {}
         self._debug_overlay = None
         self._debug_initialized = False
+
+    def __getattr__(self, name):
+        if name in _INPUT_METHODS and self.__dict__.get("input_handler") is None:
+            self._init_input()
+            return self.__dict__[name]
+        raise AttributeError(name)
 
     def _init_input(self):
         """
@@ -69,23 +82,31 @@ class Automation(metaclass=SingletonMeta):
 
         支持的输入操作经过暂停卡点。不支持的操作立即报错。
         """
+        profile = get_ui_profile(cfg).name
+        backend = get_control_backend(cfg)
         previous = getattr(self, 'input_handler', None)
         if previous is not None and callable(getattr(previous, 'close', None)):
             previous.close()
         self.input_handler = get_game_controller().get_input_handler()
 
-        touch = get_ui_profile(cfg).name == "touch_720"
-        inputs = ("mouse_click", "mouse_down", "mouse_up", "mouse_move", "mouse_drag", "secretly_write")
-        for name in inputs + _TOUCH_UNSUPPORTED_INPUTS:
-            if touch and name in _TOUCH_UNSUPPORTED_INPUTS:
+        for name in _INPUT_METHODS:
+            if profile == "touch_720" and name in _TOUCH_UNSUPPORTED_INPUTS:
                 method = _reject_touch_input(name)
             else:
                 method = pause_guard(getattr(self.input_handler, name))
             setattr(self, name, method)
+        self.connection = backend, profile
 
     def close_input(self):
         if self.input_handler is not None:
             self.input_handler.close()
+
+    def reload_connection(self):
+        self.shutdown_debug()
+        self.window_title = cfg.get_value('game_title_name')
+        self.screenshot = None
+        self.ocr_result = []
+        self._init_input()
 
     def _is_debug_enabled(self):
         """检查调试模式是否启用。"""
@@ -439,16 +460,18 @@ class Automation(metaclass=SingletonMeta):
         self.logger.debug(f"目标文字：{', '.join(targets)} 未找到匹配文字")
         return None, None
 
-    def perform_ocr(self):
-        """执行OCR识别，并更新OCR结果列表。如果未识别到文字，保留ocr_result为一个空列表。"""
+    def perform_ocr(self, *, raise_on_error=False):
+        """刷新 OCR 结果。调用方需要重试时，可以接收识别异常。"""
         try:
             self.ocr_result = ocr.recognize_multi_lines(np.array(self.screenshot))
             if not self.ocr_result:
                 self.logger.debug(f"未识别出任何文字")
                 self.ocr_result = []
         except Exception as e:
-            self.logger.error(f"OCR识别失败：{e}")
             self.ocr_result = []  # 确保在异常情况下，ocr_result为列表类型
+            if raise_on_error:
+                raise
+            self.logger.error(f"OCR识别失败：{e}")
 
     @pause_guard
     def find_text_element(self, target, include, need_ocr=True, relative=False):
@@ -939,8 +962,8 @@ class Automation(metaclass=SingletonMeta):
 
         return True
 
-    def drag_mouse(self, start, end, duration=0.5, end_pause=0.0, repeats=1):
-        """按归一化坐标连续拖动，只截图定位一次，仅最后一次可在终点停留。"""
+    def drag_mouse(self, start, end, duration=0.5, end_pause=0.0, repeats=1, *, take_screenshot=True):
+        """按归一化坐标连续拖动。调用方已核对画面时可复用它的截图定位。"""
         duration = float(duration)
         if not math.isfinite(duration) or not 0 <= duration <= 60:
             raise ValueError("滑动时长必须在 0 到 60 秒之间")
@@ -951,7 +974,10 @@ class Automation(metaclass=SingletonMeta):
             raise ValueError("连续拖动次数必须是 1 到 10 之间的整数")
         if any(not 0 <= value <= 1 for value in (*start, *end)):
             raise ValueError("坐标必须在 0 到 1 之间")
-        self.take_screenshot()
+        if take_screenshot:
+            self.take_screenshot()
+        else:
+            pause_ctl.checkpoint()
         if self.screenshot is None or self.screenshot_pos is None:
             raise RuntimeError("无法获取游戏窗口尺寸")
 

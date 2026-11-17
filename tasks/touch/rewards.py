@@ -9,13 +9,12 @@ from module.automation.automation import screenshot_retry_timeout
 from module.config import cfg
 from module.localization import tr
 from module.logger import log
-from module.notification.notification import NotificationLevel
 from module.screen import screen
-from tasks.base.base import Base
 from tasks.base.list_drag import changed_ratio, drag_list
 from tasks.base.task_steps import run_steps
 from tasks.reward.menu_alert import menu_alert
-from tasks.reward.receipt import RewardError
+from tasks.reward.receipt import RewardError, notify_reward
+from tasks.reward.sms import close_sms_receipt, find_thread_title, first_unblocked_thread
 from tasks.touch import daily
 from utils.date import Date
 from utils.image_utils import ImageUtils
@@ -46,14 +45,16 @@ class MessageTimeout(RewardError):
     """单个短信会话超时。"""
 
 
-def _close_item_reward(return_screen, *, notify=None):
+def _confirm_item_reward():
     if not auto.find_element(daily.REWARD_POPUP, "image", 0.9, crop=daily.REWARD_POPUP_CROP,
                              max_retries=15, retry_delay=0.25):
         raise RewardError("领取结果未确认（未出现获得物品）")
+
+
+def _close_item_reward(*, notify=None):
     if notify:
-        frame, _, _ = auto.take_screenshot(crop=daily.REWARD_REPORT_CROP)
-        Base.send_notification_with_screenshot(notify, NotificationLevel.ALL, screenshot=frame)
-    if not auto.click_element((960 / 1920, 854 / 1080, 0, 0), "crop"):
+        notify_reward(auto, notify, crop=daily.REWARD_REPORT_CROP)
+    if not auto.click_element(daily.REWARD_CLOSE_CROP, "crop"):
         log.warning("已确认到账，获得物品弹窗仍未关闭")
         return False
     return True
@@ -68,7 +69,8 @@ def claim_dispatch():
             return
         raise RewardError("未确认委托可领或派遣中的状态")
 
-    _close_item_reward("dispatch")
+    _confirm_item_reward()
+    _close_item_reward()
     log.info("已领取委托奖励")
 
 
@@ -93,7 +95,8 @@ def claim_mail():
         return
     if not auto.click_element_with_pos(button):
         raise RewardError("无法点击邮箱的全部领取按钮")
-    _close_item_reward("mail", notify="邮件奖励已领取")
+    _confirm_item_reward()
+    _close_item_reward(notify="邮件奖励已领取")
     log.info("已领取邮件奖励")
 
 
@@ -118,15 +121,23 @@ def _claim_srpass_tab(tab, label):
         raise RewardError("无法点击无名勋礼的一键领取")
     time.sleep(3)
     deadline = time.monotonic() + 16
+    confirmed = False
     while time.monotonic() < deadline:
         if auto.find_element(daily.REWARD_POPUP, "image", 0.9, crop=daily.REWARD_POPUP_CROP):
-            _close_item_reward(tab)
+            if not confirmed:
+                log.info(f"已领取无名勋礼{label}")
+                confirmed = True
+            _close_item_reward()
         elif auto.click_element(("点击空白处关闭", "点击任意处关闭"), "text", crop=SRPASS_CLOSE):
             time.sleep(0.5)
-        elif screen.check_screen(tab) and not auto.find_element("一键领取", "text", crop=SRPASS_RECEIVE):
-            log.info(f"已领取无名勋礼{label}")
+        elif screen.check_screen(tab) and (confirmed or not auto.find_element("一键领取", "text", crop=SRPASS_RECEIVE)):
+            if not confirmed:
+                log.info(f"已领取无名勋礼{label}")
             return
         time.sleep(0.4)
+    if confirmed:
+        log.warning("已确认无名勋礼到账，领取后未确认返回")
+        return
     raise RewardError("无名勋礼领取后未确认返回")
 
 
@@ -176,24 +187,26 @@ def find_support_gift(pixels, glyph):
 
 def claim_assist():
     screen.change_to("menu", max_recursion=1)
-    if menu_alert(auto, ASSIST_ALERT_CROP, "./assets/touch_720/images/screen/menu.png") is False:
+    if menu_alert(auto, ASSIST_ALERT_CROP, "./assets/touch_720/images/screen/menu_alert.png") is False:
         log.info("已确认更多菜单无红点")
         return
 
     screen.change_to("visa", max_recursion=1)
-    if not auto.find_element("支援角色", "text", crop=SUPPORT_HEADER):
+    gift = _find_support_gift()
+    if not gift and not auto.find_element("支援角色", "text", crop=SUPPORT_HEADER):
         if not auto.click_element("角色展示", "text", crop=(802 / 1920, 54 / 1080, 286 / 1920, 70 / 1080)):
             raise RewardError("无法切换到漫游签证的角色展示")
         time.sleep(0.5)
-    if not auto.find_element("支援角色", "text", crop=SUPPORT_HEADER):
-        raise RewardError("未确认漫游签证的支援角色栏")
-    gift = _find_support_gift()
+        gift = _find_support_gift()
+        if not gift and not auto.find_element("支援角色", "text", crop=SUPPORT_HEADER):
+            raise RewardError("未确认漫游签证的支援角色栏")
     if not gift:
         log.info("暂无支援礼盒")
         return
     if not auto.click_element_with_pos(gift):
         raise RewardError("支援礼盒无法点击")
-    _close_item_reward("visa")
+    _confirm_item_reward()
+    _close_item_reward()
     log.info("已领取支援奖励")
 
 
@@ -207,7 +220,6 @@ def _finish_message():
     finished_frames = 0
     while time.monotonic() < deadline:
         if auto.find_element(daily.REWARD_POPUP, "image", 0.9, crop=daily.REWARD_POPUP_CROP):
-            _close_item_reward("incoming_message")
             log.info("已领取短信奖励")
             return True
         if _message_pending():
@@ -241,8 +253,7 @@ def _open_unread_message(avoid=()):
     def find_thread():
         if not avoid:
             return auto.find_element(thread_icon, "image", 0.89, crop=MESSAGE_PENDING, max_retries=3, retry_delay=0.25)
-        candidates = auto.find_element(thread_icon, "image_with_multiple_targets", 0.89, crop=MESSAGE_PENDING) or []
-        return next((box for box in candidates if all(abs(box[0][1] - row) > 22 for row in avoid)), None)
+        return first_unblocked_thread(auto, MESSAGE_LIST, MESSAGE_PENDING, ((thread_icon, 0.89),), avoid)
 
     thread = find_thread()
     if not thread:
@@ -271,21 +282,32 @@ def claim_messages():
     completed = 0
     received = 0
     timed_out = 0
-    blocked_rows = set()
+    blocked_titles = set()
     drags = 0
     try:
         for _ in range(30):
-            if (not timed_out and _message_pending()) or _open_unread_message(blocked_rows):
+            if (not timed_out and _message_pending()) or _open_unread_message(blocked_titles):
                 try:
-                    received += bool(_finish_message())
+                    result = _finish_message()
+                    received += bool(result)
                     completed += 1
+                    if result and not close_sms_receipt(
+                        _close_item_reward,
+                        lambda: auto.find_element(daily.REWARD_POPUP, "image", 0.9, crop=daily.REWARD_POPUP_CROP),
+                    ):
+                        log.warning("已确认短信奖励到账，弹窗仍未关闭，停止本次短信处理")
+                        break
                 except MessageTimeout as error:
                     timed_out += 1
-                    if pending := _message_pending():
-                        blocked_rows.add(pending[0][1])
+                    title = find_thread_title(auto, MESSAGE_LIST, MESSAGE_PENDING,
+                                              f"{IMAGE_ROOT}/message_pending.png", 0.9)
                     log.warning(f"{error}，尝试返回列表继续其他会话")
                     screen.change_to("menu", max_recursion=0)
                     screen.change_to("incoming_message", max_recursion=0)
+                    if not title:
+                        log.warning("未识别超时会话标题，停止本次短信处理")
+                        break
+                    blocked_titles.add(title)
                 drags = 0
                 continue
             if drags >= 4:
@@ -299,7 +321,7 @@ def claim_messages():
             drags += 1
     finally:
         if received:
-            Base.send_notification_with_screenshot(f"处理了 {completed} 个短信会话，领取 {received} 次奖励", NotificationLevel.ALL)
+            notify_reward(auto, f"处理了 {completed} 个短信会话，领取 {received} 次奖励")
     log.info(f"本次已处理 {completed} 个短信会话" if completed else "本次未发现待处理短信")
     if timed_out:
         raise RewardError(f"有 {timed_out} 个短信会话超时")
@@ -376,7 +398,8 @@ def routine(*, on_summary=None, full_run=False, on_step=None):
 
     with screenshot_retry_timeout(5):
         result = run_steps(steps, on_step=None if on_step is None else report)
-        screen.change_to("main", max_recursion=1)
+        if result:
+            screen.change_to("main", max_recursion=1)
     if summaries and on_summary is not None:
         on_summary(tr("；").join(summaries))
     return result

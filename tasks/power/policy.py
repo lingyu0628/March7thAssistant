@@ -19,10 +19,17 @@ INSTANCE_LIMITS = {
 ENTRY_TIMEOUT = 90
 BATTLE_TIMEOUT = 30 * 60
 DEFEAT_RETRIES = 2
+_POWER_METER = re.compile(r"\+*\s*(?:满\s*)?(\d{1,4})\s*/\s*300\s*[+十]*")
+_PC_POWER_METER = re.compile(r"\+*\s*(?:满\s*)?(\d{1,4})\s*(?:/|1)\s*300\s*[+十]*")
+_IMMERSIFIER_METER = re.compile(r"\+*\s*(\d{1,2})\s*/\s*12\s*[+十]*")
 
 
 class PowerError(RuntimeError):
     """副本未达到继续消耗开拓力所需的状态。"""
+
+
+class InstanceUnavailable(PowerError):
+    """已确认指定副本无法进入。"""
 
 
 class BattleDefeat(PowerError):
@@ -49,41 +56,51 @@ def normalize(text):
     return "".join(unicodedata.normalize("NFKC", text or "").split())
 
 
+def _parse_meter(text, pattern):
+    value = unicodedata.normalize("NFKC", text or "").strip()
+    if match := pattern.fullmatch(value):
+        return int(match[1])
+    readings = {int(match[1]) for box in value.splitlines() if (match := pattern.fullmatch(box.strip()))}
+    return readings.pop() if len(readings) == 1 else None
+
+
 def parse_power(text):
-    value = unicodedata.normalize("NFKC", text or "").strip().strip("+").strip()
-    match = re.fullmatch(r"(\d{1,4})\s*/\s*300", value)
-    return int(match[1]) if match else None
+    return _parse_meter(text, _POWER_METER)
 
 
-def parse_ornament_payment(text, waves):
-    """挑战按钮从左到右显示沉浸器和开拓力。两项总价须匹配波次。"""
-    amounts = normalize(text).lower().replace("×", "").replace("x", "").replace("米", "")
-    for immersifiers in range(waves + 1):
-        cost = (waves - immersifiers) * INSTANCE_LIMITS[ORNAMENT][0]
-        if amounts == f"{immersifiers or ''}{cost or ''}":
-            return cost, immersifiers
-    return None
+def parse_pc_power(text):
+    # PC 地图上的斜线偶尔被 OCR 识别为 1。
+    return _parse_meter((text or "").replace("?", "").replace("？", ""), _PC_POWER_METER)
 
 
-def check_balance(before, after, cost, elapsed):
-    expected = before - cost
-    # 战斗期间可能跨过自然恢复的时间点。
-    ceiling = max(expected, min(300, expected + int(elapsed // 360) + 1))
-    if not expected <= after <= ceiling:
-        raise PowerError(f"结算开拓力与预期不符（预计 {expected}，实际 {after}）")
+def parse_immersifier_stock(text):
+    return _parse_meter(text, _IMMERSIFIER_METER)
+
+
+def parse_echo_rewards(text):
+    value = unicodedata.normalize("NFKC", text)
+    quotas = {int(match[1]) for match in re.finditer(r"(?<![\d/])([0-3])\s*/\s*3(?!\d)", value)}
+    return quotas.pop() if len(quotas) == 1 else None
+
+
+def plan_paid_batch(requested, available, cost_per_wave, *, immersifiers=0):
+    """先使用沉浸器，其余波次由可用开拓力支付。"""
+    waves = min(requested, immersifiers + available // cost_per_wave)
+    immersifier_cost = min(waves, immersifiers)
+    return waves, (waves - immersifier_cost) * cost_per_wave, immersifier_cost
 
 
 def batch_limit(config, instance_type):
     _, limit = INSTANCE_LIMITS[instance_type]
     value = config.instance_names_challenge_count.get(instance_type, limit)
-    if type(value) is not int or not 1 <= value <= limit:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= limit:
         log.warning(f"{instance_type} 的连续挑战次数无效，使用 {limit}")
         return limit
     return value
 
 
 def run_plan(config, plan, run_instance):
-    """按当前计划逐项执行。生成器确认一批便回写，再进行余额或退出检查。"""
+    """按当前计划逐项执行。生成器确认一批便回写，再继续运行。"""
     if not isinstance(plan, list):
         log.warning("体力计划格式无效，已保留")
         return False
@@ -99,7 +116,7 @@ def run_plan(config, plan, run_instance):
         instance_type, name, count = item
         if (not isinstance(instance_type, str) or instance_type not in INSTANCE_LIMITS
                 or not isinstance(name, str) or name == "无" or name not in names[instance_type]
-                or type(count) is not int or count <= 0):
+                or not isinstance(count, int) or isinstance(count, bool) or count <= 0):
             log.warning(f"体力计划第 {index + 1} 项副本或次数无效，已保留")
             complete = False
             continue

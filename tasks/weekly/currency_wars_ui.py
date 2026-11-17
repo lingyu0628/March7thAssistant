@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from module.logger import log
 from tasks.weekly.currency_wars_equipment import Equipment, ITEMS, RECIPES
 from tasks.weekly.currency_wars_strategy import Offer, Point, Slot
 
@@ -23,6 +24,7 @@ BOTTOM_RIGHT = (1200, 880, 1920, 1040)
 MODE_HEADER = (570, 123, 1110, 200)
 MODE_END_BUTTON = (1272, 924, 1520, 997)
 END_MATCH_CONFIRM_BUTTON = (743, 696, 1215, 789)
+END_ACTIVE_MATCH_CONFIRM_BUTTON = (570, 696, 935, 789)
 RANK_MODE = (38, 840, 330, 925)
 RANK_PROMOTION_LABEL = (183, 374, 400, 487)
 RANK_NAMES = ("黑铁", "青铜", "翠钢", "钴银", "冰钛", "紫金", "投资大师", "资本帝王", "财富造物主")
@@ -76,36 +78,58 @@ PARTNER_DETAIL_ROLE = (1500, 546, 1680, 585)
 PARTNER_DETAIL_TEXT = (1395, 612, 1865, 658)
 RESULT_TITLE = (410, 135, 1350, 410)
 RESULT_BUTTON = (650, 785, 1270, 1020)
-MATCH_WINS = ("挑战成功", "对局胜利", "晋升成功", "触发晋升赛")
-MATCH_LOSSES = ("挑战失败", "对局失败", "对局未完成", "晋升失败")
-RECONNECT_TEXT = (620, 486, 1310, 568)
-RECONNECT_CONFIRM = (1050, 631, 1310, 711)
+MATCH_WIN_TITLES = ("对局胜利", "晋升成功")
+MATCH_LOSS_TITLES = ("对局失败", "对局未完成", "晋升失败")
+MATCH_WINS = ("挑战成功", *MATCH_WIN_TITLES, "触发晋升赛")
+MATCH_LOSSES = ("挑战失败", *MATCH_LOSS_TITLES)
 CHOICE_TITLE = (555, 38, 1370, 215)
 CHOICE_CONFIRM = (615, 775, 1900, 1045)
 INVESTMENT_CONFIRM = (850, 945, 1310, 1024)
+INVESTMENT_CONFIRM_POINT = (960, 984)
+EQUIPMENT_REWARD_TITLE = (835, 16, 1230, 65)
+EQUIPMENT_REWARD_CENTERS = (1028, 738, 1319)
 ITEM_SELECTION = (835, 65, 1230, 125)
+ITEM_CARD_NAMES = (450, 279, 1590, 354)
 ITEM_CARD_DETAILS = (450, 354, 1590, 410)
 SUPPLY_CONFIRM = (1495, 949, 1890, 1021)
 ENCOUNTER_CONFIRM = (895, 866, 1280, 936)
 INVESTMENT_CENTERS = (460, 960, 1460)
 INVESTMENT_REFRESH = ((389, 856), (888, 856), (1388, 856))
+PAIRED_INVESTMENT_CENTERS = (514, 1005, 1409)
+PAIRED_INVESTMENT_REFRESH = ((441, 841), (1135, 841))
 EMPLOYEE_EVENT_TITLE = (600, 43, 1465, 102)
 EMPLOYEE_EVENT_SUBTITLE = (636, 103, 1485, 161)
+EMPLOYEE_EVENT_DETAILS = (440, 385, 1650, 436)
 EMPLOYEE_EVENT_CONFIRM = (1280, 541, 1700, 626)
+DANCE_CONFIRM_POINT = (1487, 576)
+DANCE_MIN_CARD_GAP = 136
+SVAROG_TITLE = (900, 51, 1190, 107)
+SVAROG_SUBTITLE = (880, 114, 1210, 160)
+SVAROG_COLUMNS = (
+    ((463, 837), (859, 1234), (1257, 1631)),
+    ((463, 738), (760, 1035), (1057, 1332), (1354, 1629)),
+)
+SVAROG_LAST_CARD = (1444, 285)  # 三列和四列布局的末卡都覆盖此处。
+SVAROG_CONFIRM_POINT = (1492, 585)
 GARDEN_TITLE = (920, 49, 1175, 111)
 GARDEN_SUBTITLE = (908, 113, 1190, 153)
 BOARD_EFFECT_CONFIRM = (1310, 566, 1667, 633)
 GARDEN_COLUMNS = ((444, 832), (852, 1240), (1260, 1649))
 HACK_COLUMNS = ((563, 1017), (1070, 1534))
 BOARD_EFFECT_PROMPT = (1300, 515, 1680, 566)
+DRAGON_TITLE = (900, 30, 1190, 90)
+DRAGON_SUBTITLE = (790, 76, 1330, 135)
+DRAGON_PROMPT = (1280, 423, 1725, 584)
+DRAGON_CONFIRM = (1280, 451, 1725, 655)
 SUPPLY_CENTERS = (250, 605, 960, 1315, 1670)
+SUPPLY_FOUR_CENTERS = (428, 783, 1137, 1492)
 RAIL_TITLE = (655, 51, 1450, 108)
 RAIL_DETAILS = (430, 409, 1540, 480)
 RAIL_LAUNCH = (937, 352, 1093, 409)
 RAIL_UNLOCK = (1470, 312, 1640, 354)
 RAIL_SPENT = (1480, 380, 1640, 434)
 RAIL_COLUMNS = (556, 806, 1056, 1306)
-BOARD_ADVANCE = ("出战", "跳过", "选择主角", "幕后茶歇", "开始茶歇", "前往茶歇", "前往补给")
+BOARD_ADVANCE = ("出战", "跳过", "选择主角", "开启宝库", "幕后茶歇", "开始茶歇", "前往茶歇", "前往补给")
 REVEAL_CONTINUE = (525, 650, 1780, 1065)
 PARTNER_REVEAL_TITLE = (680, 453, 902, 520)
 PARTNER_REVEAL_CONTINUE = (845, 682, 1080, 726)
@@ -117,6 +141,8 @@ HALO_GOLD = (1342, 930, 1426, 983)
 HALO_REFRESH = (290, 739, 560, 816)
 HALO_REFRESH_AREAS = (HALO_REFRESH, (1360, 739, 1638, 816))
 HALO_FRONT = ((803, 618), (908, 618), (1013, 618), (1118, 618))
+HALO_PORTRAIT_MIN_SCORE = 0.72
+HALO_PORTRAIT_MIN_GAP = 0.08
 HALO_EFFECTS = ((235, 401, 610, 758), (1320, 401, 1700, 758))
 HALO_OPTION_POINTS = ((420, 435), (1499, 435))
 HALO_RISKS = ("熄火", "只能造成1", "变为", "无法", "献祭", "离场", "乱披风拳法", "优先施放普攻",
@@ -124,6 +150,10 @@ HALO_RISKS = ("熄火", "只能造成1", "变为", "无法", "献祭", "离场",
 HALO_TARGET_FACE = (930, 412, 989, 468)
 HALO_DETAIL_BUTTON = (27, 919, 262, 994)
 HALO_DETAIL_NAME = (813, 180, 1088, 225)
+MENTOR_TITLE = (780, 40, 1250, 145)
+MENTOR_PROMPT = (590, 78, 1460, 201)
+MENTOR_CONFIRM = (1250, 451, 1760, 650)
+MENTOR_CONFIRM_X = 1492
 TEA_RETURN = (1600, 20, 1919, 115)
 AUTO_CONTROLS = (1592, 17, 1912, 98)
 AUTO_HINT = (0, 903, 144, 1023)
@@ -136,7 +166,9 @@ MODE_NAMES = {"normal": "标准博弈", "overclock": "超频博弈"}
 MODE_ENTRIES = tuple("进入" + name for name in MODE_NAMES.values())
 CONTINUE_MATCH = ("继续进度", "继续对局", "继续博弈")
 END_MATCH = ("结束并结算", "放弃并结算")
-ITEM_CHOICES = ("武装箱", "简易武装箱", "完整武装箱", "进阶武装箱", "特权武装箱", "星徽秘典", "阿哈")
+WEAPON_BOXES = ("武装箱", "简易武装箱", "完整武装箱", "进阶武装箱", "特权武装箱")
+EQUIPMENT_REWARD = "选择装备"
+ITEM_CHOICES = (*WEAPON_BOXES, *(f"阿哈·{box}" for box in WEAPON_BOXES), "星徽秘典", "阿哈", EQUIPMENT_REWARD)
 RECRUIT_CHOICES = ("员工招募书", "员工聘用书", "专家邀请函")
 INVESTMENT_CHOICES = ("请选择投资策略", "投资策略")
 CHOICES = (
@@ -185,11 +217,14 @@ class Page(Enum):
     CHOICE = "节点选择"
     DANCE = "梦境交织共舞"
     RANGER = "巡海游侠任命"
+    SVAROG_MODIFICATION = "机心巧匠改装"
+    DRAGON_CLEANSE = "苍龙濯世"
     GARDEN = "奇兽花园"
     HACK = "骇入效果"
     HALO = "主角光环"
     HALO_DETAIL = "主角光环角色详情"
     HALO_REPLACE = "替换已有光环提示"
+    HALO_MENTOR = "从师"
     HALO_TIP = "重选光环提示"
     HALO_INFO = "主角光环与奇遇详情"
     TEA = "幕后茶歇"
@@ -198,7 +233,6 @@ class Page(Enum):
     BATTLE = "战斗"
     NODE_RESULT = "节点结算"
     MATCH_RESULT = "对局结算"
-    RECONNECT = "游戏重连提示"
     DISCONNECTED = "云游戏中断"
 
 
@@ -248,7 +282,8 @@ class Frame:
     @cached_property
     def action_context(self):
         """输入必须始终属于同一节点和同一层界面。"""
-        if self.page == Page.RECONNECT:
+        # 独立弹层的操作只依赖弹层本身。背景节点号漏读或跳变不代表弹层已关闭。
+        if self.page in (Page.SVAROG_MODIFICATION, Page.HALO_MENTOR):
             return self.page, None, None
         dialog = {Page.CHOICE: "choice", Page.REVEAL: "reveal_kind"}.get(self.page)
         return self.page, self.stage, getattr(self, dialog) if dialog else None
@@ -285,23 +320,31 @@ class Frame:
     def read_local(self, area: Area, *, recognition_only=False) -> str | None:
         from module.ocr import ocr
 
-        crop = cv2.resize(self.crop(area), None, fx=2, fy=2)
-        if recognition_only:
-            rows = ocr.recognize_multi_lines(crop, recognition_only=True)
-            if len(rows) != 1:
-                return None
-            value, confidence = rows[0][1]
-            return normalized(value) if confidence >= 0.72 else None
-        result = ocr.recognize_single_line(crop)
-        return normalized(result[0]) if result and result[1] >= 0.55 else None
+        try:
+            crop = cv2.resize(self.crop(area), None, fx=2, fy=2)
+            if recognition_only:
+                rows = ocr.recognize_multi_lines(crop, recognition_only=True)
+                if not rows or len(rows) != 1:
+                    return None
+                value, confidence = rows[0][1]
+                return normalized(value) if confidence >= 0.72 else None
+            result = ocr.recognize_single_line(crop)
+            return normalized(result[0]) if result and result[1] >= 0.55 else None
+        except Exception as error:
+            log.debug(f"货币战争局部文字暂未识别（{area}）：{error}")
+            return None
 
-    def number(self, area: Area, upper: int, *, local=False) -> int | None:
-        value = self.value(r"\d{1,7}", area)
+    def number(self, area: Area, upper: int, *, local=False, badge=False) -> int | None:
+        pattern = r"\d{1,7}"
+        if badge:
+            pattern = rf"(?:{pattern}|\[{pattern}\])"
+        value = self.value(pattern, area)
         if value is None and local:
             value = self.read_local(area)
-        if value and re.fullmatch(r"\d{1,7}", value) and int(value) <= upper:
-            return int(value)
-        return None
+        if not value or not re.fullmatch(pattern, value):
+            return None
+        number = int(value.strip("[]"))
+        return number if number <= upper else None
 
     def ratio(self, area: Area) -> tuple[int, int] | None:
         value = self.value(r"\d{1,7}/\d{1,7}", area)
@@ -352,11 +395,11 @@ class Frame:
         if candidate and candidate[1] >= 10:
             wide = parse(self.read_local((860, 215, 1085, 302), recognition_only=True))
             if wide and wide[1] == candidate[1] and wide != candidate:
-                if self._matches_field(wide[0], self.slots()):
+                if self._matches_field(wide[0], self.field_slots()):
                     return wide
         if digits is None or whole is None or whole[0] == digits[0]:
             return candidate
-        slots = self.slots()
+        slots = self.field_slots()
         if slots:
             return next((count for count in (digits, whole) if self._matches_field(count[0], slots)), None)
         return None
@@ -374,10 +417,16 @@ class Frame:
         visible = sum(slot.occupied for slot in slots if slot.zone != "bench")
         if visible == used:
             return True
+        if used < visible:
+            return False
         # 双人口光环的角色仍只占一个实体卡位。每名光环角色最多解释一个差额。
-        return 0 < used - visible <= sum(
-            slot.zone == "front" and slot.occupied and self.assigned_halo(slot.point) for slot in slots
-        )
+        try:
+            return used - visible <= sum(
+                slot.zone == "front" and slot.occupied and self.assigned_halo(slot.point) for slot in slots
+            )
+        except (OSError, cv2.error) as error:
+            log.debug(f"货币战争暂未核对部署人数中的光环加成：{error}")
+            return False
 
     @cached_property
     def squad_health(self) -> int | None:
@@ -448,8 +497,8 @@ class Frame:
 
     @cached_property
     def choice(self) -> str | None:
-        label = self.find(*CHOICES, area=CHOICE_TITLE)
-        if (label and label.text in ("武装箱", "阿哈")
+        label = self.find(EQUIPMENT_REWARD, area=EQUIPMENT_REWARD_TITLE) or self.find(*CHOICES, area=CHOICE_TITLE)
+        if (label and (label.text in ("武装箱", "阿哈", EQUIPMENT_REWARD) or label.text.startswith("阿哈·"))
                 and not self.has("请选择1个", "请选择一个", area=ITEM_SELECTION)
                 and not self.has("查看详情", area=ITEM_CARD_DETAILS)):
             return None
@@ -480,18 +529,30 @@ class Frame:
 
     @cached_property
     def combat_buttons(self) -> bool:
+        if self.combat_progress or self.find("敌方行动中", "我方行动中", area=(1580, 945, 1920, 1050)):
+            return True
         # 自动战斗关闭时右上按钮没有高亮边框，使用关卡 HUD 和左下提示识别该画面。
-        manual_battle = self.auto_off and any(
-            re.search(r"[1-3]-[1-9](?:\d{1,3}%)?$", label.text) for label in self.texts(BATTLE_HUD)
-        )
-        return bool(self.combat_progress or manual_battle
-                    or self.match("screen/currency_wars/s2_auto_button.png", BATTLE_AUTO_CONTROL, 0.87)
-                    or self.match("forgottenhall/pause.png", AUTO_CONTROLS, 0.86)
-                    or self.find("敌方行动中", "我方行动中", area=(1580, 945, 1920, 1050)))
+        if any(re.search(r"[1-3]-[1-9](?:\d{1,3}%)?$", label.text)
+               for label in self.texts(BATTLE_HUD)) and self.auto_off:
+            return True
+        for path, area, threshold in (
+            ("screen/currency_wars/s2_auto_button.png", BATTLE_AUTO_CONTROL, 0.87),
+            ("forgottenhall/pause.png", AUTO_CONTROLS, 0.86),
+        ):
+            try:
+                if self.match(path, area, threshold):
+                    return True
+            except (OSError, cv2.error) as error:
+                log.debug(f"货币战争战斗控件暂未识别（{path}）：{error}")
+        return False
 
     @cached_property
-    def auto_off(self) -> bool:
-        return bool(self.match("share/base/not_auto.png", AUTO_HINT, 0.9))
+    def auto_off(self) -> bool | None:
+        try:
+            return bool(self.match("share/base/not_auto.png", AUTO_HINT, 0.9))
+        except (OSError, cv2.error) as error:
+            log.debug(f"货币战争暂未识别自动战斗状态：{error}")
+            return None
 
     @cached_property
     def bench_overflow(self) -> bool:
@@ -504,53 +565,76 @@ class Frame:
         return self.has("收起", area=BOARD_SHOP) and self.has(*SHOP_REFRESH_LABELS, area=SHOP_REFRESH)
 
     @cached_property
-    def reconnect_dialog(self) -> bool:
-        message = "".join(label.text for label in self.texts(RECONNECT_TEXT))
-        return (all(part in message for part in ("失去网络连接", "战斗结果同步失败", "是否尝试重新连接"))
-                and self.has("提示", area=(868, 379, 1056, 443)))
-
-    def reconnect_confirm(self) -> Label | None:
-        if self.reconnect_dialog:
-            return self.enabled_button(self.find("确认", area=RECONNECT_CONFIRM))
+    def end_match_confirm_area(self) -> Area | None:
+        if not self.has("提示", area=(714, 306, 884, 372)):
+            return None
+        message = "".join(label.text for label in self.texts((740, 377, 1490, 465)))
+        if "中断挑战并保存当前进度" in message:
+            # 局内退出时左侧是放弃结算，右侧是暂时离开。
+            return END_ACTIVE_MATCH_CONFIRM_BUTTON
+        if any(prompt in message for prompt in ("结算并重置进度", "确定结束进程")):
+            return END_MATCH_CONFIRM_BUTTON
         return None
 
     @cached_property
     def end_match_dialog(self) -> bool:
-        message = "".join(label.text for label in self.texts((740, 377, 1490, 465)))
-        return (any(prompt in message for prompt in ("结算并重置进度", "确定结束进程"))
-                and self.has("提示", area=(714, 306, 884, 372)))
+        return self.end_match_confirm_area is not None
+
+    def end_match_confirm(self) -> Label | None:
+        if (area := self.end_match_confirm_area) is not None:
+            return self.enabled_button(self.find("放弃并结算", area=area))
+        return None
 
     @cached_property
     def page(self) -> Page:
         if (self.find("连接中断") and self.find("退出游戏")) or (
                 self.find("加载失败", contains=True) and self.find("立即切换")):
             return Page.DISCONNECTED
-        if self.reconnect_dialog:
-            return Page.RECONNECT
         if "背包内助燃券持有数量已达上限" in "".join(
                 label.text for label in self.texts((385, 323, 1540, 650))):
             return Page.REWARD_LIMIT
-        if self.reward_close():
-            return Page.REWARD_RECEIPT
+        cancel = self.find("取消", area=(552, 631, 930, 720))
+        halo_replace = cancel and self.has("替换该角色原有光环", area=(713, 453, 1210, 565), contains=True)
+        fight_prompt = self.find("本局不再提示", area=(730, 480, 1150, 730)) and self.find(
+            "确认", area=(780, 605, 1280, 830))
+        # 未识别的居中提示可能覆盖已读到的背景控件。
+        if (not (halo_replace or fight_prompt) and self.has("提示", area=(868, 379, 1056, 443))
+                and self.has("确认", area=(1050, 631, 1310, 711))
+                and (cancel or self.texts((620, 486, 1310, 568))) and not self.empty_front_confirm()):
+            return Page.CONFLICT
+        try:
+            if self.reward_close():
+                return Page.REWARD_RECEIPT
+        except (OSError, cv2.error) as error:
+            log.debug(f"货币战争奖励关闭按钮暂未识别：{error}")
+            return Page.UNKNOWN
         if self.find("积分奖励", area=WEEKLY_TITLE):
             return Page.WEEKLY
 
         node_title = self.find("挑战成功", "挑战失败", "挑战结束", area=RESULT_TITLE)
+        match_title = self.has(*MATCH_WIN_TITLES, *MATCH_LOSS_TITLES, area=RESULT_TITLE)
         if self.promoted_rank is not None or self.has("返回货币战争", area=(500, 735, 1900, 1055)) or (
-                node_title and self.find("对局评价", area=RESULT_TITLE)) or (
-                self.has(*(MATCH_WINS[1:] + MATCH_LOSSES[1:]), area=RESULT_TITLE)
+                node_title and self.find("对局评价", area=RESULT_TITLE)) or match_title or (
+                self.has("触发晋升赛", area=RESULT_TITLE)
                 and self.find("下一页", "下一步", "前往结算", area=RESULT_BUTTON)):
             return Page.CONFLICT if self.combat_buttons else Page.MATCH_RESULT
         if node_title and self.find("继续挑战", "前往结算", area=RESULT_BUTTON):
             return Page.CONFLICT if self.combat_buttons else Page.NODE_RESULT
         if self.combat_buttons:
-            if self.season or self.find(*BOARD_ADVANCE, area=BOARD_FIGHT):
+            if self.season or self.board_advance:
                 return Page.CONFLICT
             return Page.BATTLE
         if self.end_match_dialog:
             return Page.END_MATCH_CONFIRM
         if self.empty_front_confirm():
             return Page.EMPTY_FRONT
+        if self.mentor_prompt or (self.has("从师", area=MENTOR_TITLE) and (
+                self.mentor_confirm_label or self.mentor_selection_prompt or self.mentor_confirm())):
+            return Page.HALO_MENTOR
+        if self.svarog_modification:
+            return Page.SVAROG_MODIFICATION
+        if self.dragon_cleanse:
+            return Page.DRAGON_CLEANSE
 
         if self.has("主角光环与奇遇详情", area=(420, 27, 1065, 104), contains=True) and (
                 self.has("前往重选", area=(640, 164, 1360, 260), contains=True)
@@ -564,11 +648,11 @@ class Frame:
             if bright.mean(axis=1).max() >= 0.66:
                 return Page.HALO_TIP
 
-        if (self.stage and self.has("确认选择", area=EMPLOYEE_EVENT_CONFIRM)
-                and self.has("梦境交织", area=EMPLOYEE_EVENT_TITLE)
+        if (self.stage and self.has("梦境交织", area=EMPLOYEE_EVENT_TITLE)
                 and self.has("选择2个角色进行共舞", "选择2名角色进行共舞",
                              area=EMPLOYEE_EVENT_SUBTITLE, contains=True)):
-            return Page.DANCE
+            if self.has("确认选择", area=EMPLOYEE_EVENT_CONFIRM) or len(self.dance_cards) >= 2:
+                return Page.DANCE
         if (self.has("巡海游侠", area=EMPLOYEE_EVENT_TITLE)
                 and (self.has("任命1名角色", "任命一名角色", area=EMPLOYEE_EVENT_SUBTITLE, contains=True)
                      or self.has("确认选择", area=EMPLOYEE_EVENT_CONFIRM))):
@@ -599,11 +683,9 @@ class Frame:
                     or self.find("周额外晋升点", area=(45, 115, 515, 173), contains=True)):
                 return Page.MODES
 
-        if self.find("本局不再提示", area=(730, 480, 1150, 730)) and self.find(
-                "确认", area=(780, 605, 1280, 830)):
+        if fight_prompt:
             return Page.CONFIRM_FIGHT
-        if (self.has("替换该角色原有光环", area=(713, 453, 1210, 565), contains=True)
-                and self.find("取消", area=(552, 631, 930, 720))):
+        if halo_replace:
             return Page.HALO_REPLACE
         if self.find("选择一个角色获得主角光环", area=HALO_HEADER):
             return Page.HALO
@@ -649,11 +731,17 @@ class Frame:
                 return Page.BENCH_FULL
             if self.shop_open:
                 return Page.SHOP
-            if (self.capacity and self.find("商店", area=BOARD_SHOP)
-                    and self.find(*BOARD_ADVANCE, area=BOARD_FIGHT)
-                    and self._board_rows_visible()):
+            if self.find("商店", area=BOARD_SHOP) and self.board_advance and self._board_rows_visible():
                 return Page.BOARD
         return Page.UNKNOWN
+
+    @cached_property
+    def board_advance(self) -> Label | None:
+        buttons = tuple(
+            label for label in self.texts(BOARD_FIGHT)
+            if label.text in BOARD_ADVANCE or re.fullmatch(r"跳过\([1-9]\d*/[1-9]\d*\)", label.text)
+        )
+        return buttons[0] if len(buttons) == 1 else None
 
     def _board_rows_visible(self):
         front_area = (850, 304, 1100, 326)
@@ -666,7 +754,7 @@ class Frame:
                 or self.has("前台区", area=(850, 327, 1100, 353), contains=True)
                 or self.has("备战席已满", area=(420, 266, 1510, 561), contains=True)):
             return False
-        slots = self.slots()
+        slots = self.field_slots()
         return bool(slots and self.field_count_matches(slots))
 
     @cached_property
@@ -790,6 +878,13 @@ class Frame:
         # 溢出页给空格绘制红色斜纹。真正角色仍有多通道纹理。
         return float(np.median(contrast) if self.bench_overflow else contrast.max()) >= 14.0
 
+    def fixed_partner(self, point: Point) -> bool:
+        x, y = point
+        # 佩佩占用后台格和部署人数。头像在获得不同星徽时相同。
+        return y == BACK_Y and self.match(
+            "screen/currency_wars/s2_peppy.png", (x - 52, y - 54, x + 52, y + 39), 0.85,
+        ) is not None
+
     def back_row(self) -> tuple[int, ...]:
         """从横向边缘确定 S2 后台布局。6/8 格与 7/9 格交错，比较左右两侧的边缘。"""
         candidates = []
@@ -810,7 +905,7 @@ class Frame:
             return ()
         return max(candidates)[2]
 
-    def slots(self) -> tuple[Slot, ...]:
+    def field_slots(self) -> tuple[Slot, ...]:
         xs = self.back_row()
         if not xs:
             return ()
@@ -818,8 +913,14 @@ class Frame:
         for zone, centers, y in (("front", (745, 888, 1030, 1173), FRONT_Y),
                                  ("back", xs, BACK_Y)):
             for i, x in enumerate(centers):
-                result.append(Slot(zone, i, (x, y), self.slot_occupied((x, y))))
-        return tuple(result) + self.bench_slots()
+                point = (x, y)
+                occupied = self.slot_occupied(point)
+                result.append(Slot(zone, i, point, occupied, blocked=occupied and self.fixed_partner(point)))
+        return tuple(result)
+
+    def slots(self) -> tuple[Slot, ...]:
+        field = self.field_slots()
+        return field + self.bench_slots() if field else ()
 
     @cached_property
     def black_hole_slots(self) -> frozenset[Point]:
@@ -985,8 +1086,9 @@ class Frame:
 
     @cached_property
     def menu_mode(self) -> str | None:
-        label = self.find(*MODE_NAMES.values(), area=MODE_HEADER)
-        return next((mode for mode, title in MODE_NAMES.items() if label and label.text == title), None)
+        titles = {label.text for label in self.texts(MODE_HEADER)}
+        modes = [mode for mode, title in MODE_NAMES.items() if title in titles]
+        return modes[0] if len(modes) == 1 else None
 
     @cached_property
     def unfinished_match(self) -> bool:
@@ -1023,7 +1125,8 @@ class Frame:
 
     @cached_property
     def enemy_rank(self) -> int | None:
-        return self.number(RANK_ENEMY, 999, local=True)
+        # OCR 可能把数字徽章的边框和数字一起识别为 [72]。
+        return self.number(RANK_ENEMY, 999, local=True, badge=True)
 
     @cached_property
     def rank_tier(self) -> int | None:
@@ -1048,7 +1151,7 @@ class Frame:
 
     @cached_property
     def rank_affixes(self) -> int | None:
-        value = self.number(RANK_AFFIXES, 9, local=True)
+        value = self.number(RANK_AFFIXES, 9, local=True, badge=True)
         if value is None and self.rank_tier in (0, 1) and not self.has(
                 "词缀数量", area=(605, 989, 750, 1018)):
             return 0
@@ -1069,9 +1172,16 @@ class Frame:
             return self.match("zh_CN/base/click_close.png", REWARD_DISMISS, 0.80)
         return None
 
-    def reward_limit_confirm(self) -> Label | None:
-        if self.page == Page.REWARD_LIMIT:
-            return self.enabled_button(self.find("确认", "确定", area=(715, 560, 1210, 828)))
+    def reward_limit_close(self) -> Point | None:
+        if self.page != Page.REWARD_LIMIT:
+            return None
+        if button := self.enabled_button(self.find("确认", "确定", area=(715, 560, 1210, 828))):
+            return button.point
+        if close := self.find("X", "x", "×", area=(1425, 345, 1498, 413)):
+            return close.point
+        if (self.has("清理", area=(571, 679, 932, 738))
+                and self.has("前往使用", area=(989, 679, 1349, 738))):
+            return 1462, 379
         return None
 
     def empty_front_confirm(self) -> Label | None:
@@ -1082,11 +1192,14 @@ class Frame:
     def duplicate_deployment(self) -> bool:
         return self.has("无法上阵同名角色", "同名角色无法上阵", area=(580, 215, 1345, 455), contains=True)
 
-    def claim_available(self) -> bool | None:
+    def claim_button_visible(self) -> bool:
         text = "".join(label.text for label in sorted(self.texts(WEEKLY_CLAIM), key=lambda item: item.point[0]))
         patch = self.crop(WEEKLY_CLAIM)
         yellow = (patch[:, :, 0] > 204) & (patch[:, :, 1] > 141) & (patch[:, :, 2] < 140)
-        if "键领取" in text and float(yellow.mean()) > 0.18:
+        return "键领取" in text and float(yellow.mean()) > 0.18
+
+    def claim_available(self) -> bool | None:
+        if self.claim_button_visible():
             return True
 
         # 全部可领取奖励到账后，正式服会隐藏按钮。以积分档位与已领标志为证据。
@@ -1195,63 +1308,221 @@ class Frame:
                 return label
         return None
 
+    def _wide_confirm(self, button: Label | None, area: Area, center_x: int) -> Label | None:
+        x = button.point[0] if button else center_x
+        top, bottom = area[1], area[3]
+        # 从文字两侧识别点亮的按钮底色，文字漏读时用横条推定按钮高度。
+        sides = (self.crop((x - 125, top, x - 57, bottom)), self.crop((x + 57, top, x + 125, bottom)))
+        bright = np.logical_and.reduce([
+            (cv2.cvtColor(side, cv2.COLOR_RGB2GRAY) >= 178).mean(axis=1) > 0.55 for side in sides
+        ])
+        edges = np.flatnonzero(np.diff(np.r_[False, bright, False])) + top
+        buttons = [(int(start), int(end)) for start, end in zip(edges[::2], edges[1::2]) if 22 <= end - start <= 75]
+        if button:
+            return button if any(start <= button.point[1] < end for start, end in buttons) else None
+        if len(buttons) == 1:
+            start, end = buttons[0]
+            return Label("确认选择", (x, (start + end) // 2))
+        return None
+
     def choice_confirm(self) -> Label | None:
         return self.enabled_button(self.find("确认", "确认选择", "选定", "选择", area=CHOICE_CONFIRM))
 
+    def investment_confirm(self, *, enabled_only=False) -> Label | None:
+        button = self.find("确认", area=INVESTMENT_CONFIRM) or Label("确认", INVESTMENT_CONFIRM_POINT)
+        return self.enabled_button(button) if enabled_only else button
+
+    @cached_property
+    def paired_investment(self) -> bool:
+        return self.choice in INVESTMENT_CHOICES and (
+            self.has("选择一个", area=(300, 225, 725, 272))
+            or self.has("两个都带走", area=(795, 225, 1620, 272))
+        )
+
+    @property
+    def investment_groups(self) -> tuple[tuple[int, ...], ...]:
+        return ((0,), (1, 2)) if self.paired_investment else ((0,), (1,), (2,))
+
+    def investment_card_point(self, column: int) -> Point:
+        if self.paired_investment:
+            return PAIRED_INVESTMENT_CENTERS[column], 420
+        return INVESTMENT_CENTERS[column], 393 if self.choice == "投资环境" else 490
+
+    def investment_card_texts(self, column: int) -> tuple[Label, ...]:
+        x, _ = self.investment_card_point(column)
+        top = 360 if self.choice == "投资环境" else (537 if self.paired_investment else 353)
+        return self.texts((x - 195, top, x + 195, 829))
+
     def investment_card_title(self, column: int) -> Label | None:
-        x = INVESTMENT_CENTERS[column]
-        title_top, title_bottom, effect_top = (360, 420, 421) if self.choice == "投资环境" else (459, 516, 520)
-        labels = self.texts((x - 195, title_top, x + 195, title_bottom))
-        effect = self.texts((x - 195, effect_top, x + 195, 829))
-        return labels[0] if len(labels) == 1 and effect else None
+        texts = self.investment_card_texts(column)
+        title = min(texts, key=lambda label: label.point[1], default=None)
+        bottom = 420 if self.choice == "投资环境" else (597 if self.paired_investment else 560)
+        if title and title.point[1] < bottom and any(label.point[1] >= title.point[1] + 24 for label in texts):
+            return title
+        return None
 
     def investment_titles(self) -> tuple[str | None, ...]:
         return tuple(label.text if label else None
                      for label in map(self.investment_card_title, range(len(INVESTMENT_CENTERS))))
 
-    def investment_card_point(self, column: int) -> Point:
-        return INVESTMENT_CENTERS[column], 393 if self.choice == "投资环境" else 490
-
     @cached_property
     def uncollected_investment_columns(self) -> frozenset[int]:
         # 环境和策略的卡宽不同，书本标记都在各自卡片的右上角。
-        return frozenset(index for index, x in enumerate(INVESTMENT_CENTERS)
-                         if self.match("screen/currency_wars/new.png", (x + 125, 178, x + 265, 294)))
+        if self.paired_investment:
+            areas = ((x + 117, 278, x + 176, 343) for x in PAIRED_INVESTMENT_CENTERS)
+        else:
+            areas = ((x + 125, 178, x + 265, 294) for x in INVESTMENT_CENTERS)
+        return frozenset(index for index, area in enumerate(areas)
+                         if self.match("screen/currency_wars/new.png", area))
 
     def investment_layout_changed(self, before) -> bool:
-        areas = ((x - 145, 177, x + 145, 375) for x in INVESTMENT_CENTERS)
+        centers, top, bottom = (PAIRED_INVESTMENT_CENTERS, 300, 500) if self.paired_investment else (
+            INVESTMENT_CENTERS, 177, 375)
+        areas = ((x - 145, top, x + 145, bottom) for x in centers)
         return sum(cv2.absdiff(self.crop(area), before.crop(area)).mean() > 30 for area in areas) >= 2
 
-    def investment_refresh_count(self, column: int) -> int | None:
-        x, y = INVESTMENT_REFRESH[column]
+    @property
+    def investment_refresh_points(self) -> tuple[Point, ...]:
+        return PAIRED_INVESTMENT_REFRESH if self.paired_investment else INVESTMENT_REFRESH
+
+    def investment_refresh_count(self, point: Point) -> int | None:
+        x, y = point
         value = self.value(r"刷新次数[01]", (x + 18, y - 31, x + 176, y + 31))
         return int(value[-1]) if value else None
 
     def item_cards(self) -> tuple[Label, ...]:
-        return tuple(label for label in self.texts((450, 279, 1590, 354))
+        return tuple(label for label in self.texts(ITEM_CARD_NAMES)
                      if re.fullmatch(r"[\u3400-\u9fff·]{3,16}", label.text) and self.has(
                          "查看详情", area=(label.point[0] - 95, 354, label.point[0] + 95, 410)))
 
     @cached_property
+    def employee_event_details(self) -> tuple[Label, ...]:
+        return self.matching(("详情",), EMPLOYEE_EVENT_DETAILS)
+
+    @cached_property
     def employee_event_candidates(self) -> tuple[Label, ...]:
         return tuple(label for label in self.texts((440, 325, 1650, 390))
-                     if re.fullmatch(EMPLOYEE_NAME, label.text) and (self.page == Page.RANGER or self.has(
-                         "详情", area=(label.point[0] - 68, 385, label.point[0] + 69, 436))))
+                     if re.fullmatch(EMPLOYEE_NAME, label.text) and label.text not in ("详情", "查看详情"))
+
+    @cached_property
+    def svarog_modification(self) -> bool:
+        title = self.has("机心巧匠", area=SVAROG_TITLE)
+        prompt = self.has("请选择1个强化效果", "请选择一个强化效果", area=SVAROG_SUBTITLE)
+        confirm = self.has("确认选择", area=EMPLOYEE_EVENT_CONFIRM)
+        return (title and (prompt or confirm)
+                or prompt and confirm and len(self.employee_event_details) >= 2)
+
+    @cached_property
+    def svarog_offers(self) -> tuple[tuple[Label, int | None], ...]:
+        layouts = []
+        for columns in SVAROG_COLUMNS:
+            offers = []
+            evidence = 0
+            for left, right in columns:
+                x = (left + right) // 2
+                price_area = (right - 33, 359, right - 7, 394)
+                price = self.number(price_area, 99)
+                details = self.has("详情", area=(x - 18, 404, x + 38, 441))
+                # 详情和报价一起漏读时，金币图标仍能区分三列和四列。
+                r, g, b = self.crop((right - 68, 363, right - 33, 391)).astype(np.int16).transpose(2, 0, 1)
+                coin = ((r > 130) & (g > 85) & (g - b > 25) & (r - b > 55)).mean() > 0.25
+                evidence += int(price is not None or details or coin)
+                name = self.value(EMPLOYEE_NAME, (left, 350, right - 74, 397))
+                offers.append((Label(name or "强化模组", (x, 285)), price, price_area))
+            layouts.append((evidence, offers))
+        _, offers = max(layouts, key=lambda layout: layout[0])
+        # 整屏 OCR 常漏掉金币图标旁的单字报价，按已确认的列布局单独读取数字。
+        priced_offers = []
+        for card, price, area in offers:
+            if price is None:
+                value = self.read_local(area, recognition_only=True)
+                price = int(value) if re.fullmatch(r"\d{1,2}", value or "") else None
+            priced_offers.append((card, price))
+        return tuple(priced_offers)
+
+    def svarog_card_outlined(self, card: Label) -> bool:
+        x, _ = card.point
+        edge = self.crop((x - 65, 393, x + 65, 401))
+        return (edge.min(axis=2) > 155).mean(axis=1).max() >= 0.8
+
+    @cached_property
+    def dance_cards(self) -> tuple[tuple[Label, int], ...]:
+        """返回可点选的共舞卡片及用于核对选中标记的横坐标。"""
+        cards = []
+        names = self.employee_event_candidates
+        for detail in self.employee_event_details:
+            x = detail.point[0]
+            if any(abs(x - column) <= DANCE_MIN_CARD_GAP for _, column in cards):
+                continue
+            name = min((label for label in names if abs(label.point[0] - x) <= 68),
+                       key=lambda label: abs(label.point[0] - x), default=None)
+            cards.append((name or Label("候选角色", (x, 355)), x))
+        # 详情漏读时，只有与已知卡位横向分开的姓名才能补出一列。
+        for name in sorted(names, key=lambda label: label.confidence, reverse=True):
+            x = name.point[0]
+            if all(abs(x - column) > DANCE_MIN_CARD_GAP and abs(x - card.point[0]) > DANCE_MIN_CARD_GAP
+                   for card, column in cards):
+                cards.append((name, x))
+        return tuple(cards)
 
     @cached_property
     def employee_event_selected(self) -> frozenset[str]:
-        selected = set()
-        for label in self.employee_event_candidates:
-            x, _ = label.point
-            badge = self.crop((x - 75, 184, x - 29, 207)).astype(np.int16)
-            r, g, b = badge.transpose(2, 0, 1)
-            if self.has("已选择", area=(x - 102, 174, x + 15, 220), contains=True) or (
-                    ((r > 186) & (g > 138) & (r - b > 45)).mean() > 0.35):
-                selected.add(label.text)
-        return frozenset(selected)
+        return frozenset(label.text for label in self.employee_event_candidates
+                         if self.employee_event_card_selected(label.point[0]))
+
+    def employee_event_card_selected(self, x: int) -> bool:
+        badge = self.crop((x - 75, 184, x - 29, 207)).astype(np.int16)
+        r, g, b = badge.transpose(2, 0, 1)
+        return self.has("已选择", area=(x - 102, 174, x + 15, 220), contains=True) or (
+            ((r > 186) & (g > 138) & (r - b > 45)).mean() > 0.35
+        )
+
+    @cached_property
+    def unlabeled_dance_confirm(self) -> Label | None:
+        if self.page == Page.DANCE and not self.has("确认选择", area=EMPLOYEE_EVENT_CONFIRM):
+            return self.enabled_button(Label("确认选择", DANCE_CONFIRM_POINT))
+        return None
+
+    @cached_property
+    def dance_pair_selected(self) -> bool:
+        return sum(self.employee_event_card_selected(x) for _, x in self.dance_cards) == 2
 
     def employee_event_confirm(self) -> Label | None:
-        return self.enabled_button(self.find("确认选择", area=EMPLOYEE_EVENT_CONFIRM))
+        if button := self.find("确认选择", area=EMPLOYEE_EVENT_CONFIRM):
+            return self.enabled_button(button)
+        if self.unlabeled_dance_confirm and self.dance_pair_selected:
+            return self.unlabeled_dance_confirm
+        return None
+
+    @cached_property
+    def dragon_cleanse(self) -> bool:
+        subtitle = "".join(label.text for label in self.texts(DRAGON_SUBTITLE))
+        if re.search(r"洗掉[一1]个敌人词缀", subtitle):
+            return True
+        return self.has("苍龙濯世", "苍龙灌世", area=DRAGON_TITLE) and (
+            self.has("请选择一个词缀", "请选择1个词缀", area=DRAGON_PROMPT)
+            or self.has("确认选择", area=DRAGON_CONFIRM)
+        )
+
+    @cached_property
+    def dragon_affixes(self) -> tuple[Label, ...]:
+        # 卡片数量可变，用红色卡身定位实际可选区域，词缀名只用于日志。
+        left, right = 400, 1690
+        red, green, blue = self.crop((left, 300, right, 372)).astype(np.int16).transpose(2, 0, 1)
+        colored = (red >= 70) & (red - green >= 24) & (red - blue >= 17)
+        columns = colored.mean(axis=0) >= 0.55
+        edges = np.flatnonzero(np.diff(np.r_[0, columns, 0])) + left
+        cards = []
+        for start, end in zip(edges[::2], edges[1::2]):
+            if end - start < 140:
+                continue
+            title = "".join(label.text for label in self.texts((start, 126, end, 200)))
+            cards.append(Label(title or "敌人词缀", (int((start + end) // 2), 336)))
+        return tuple(cards)
+
+    def dragon_confirm(self) -> Label | None:
+        button = self.find("确认选择", area=DRAGON_CONFIRM)
+        return self._wide_confirm(button, DRAGON_CONFIRM, 1492)
 
     @cached_property
     def board_effect_cards(self) -> tuple[tuple[Label, str], ...]:
@@ -1287,13 +1558,39 @@ class Frame:
     def supply_selection(self) -> tuple[int, int] | None:
         count = self.value(r"已选择\d/\d", (1510, 882, 1820, 951))
         if count:
-            return tuple(map(int, count.removeprefix("已选择").split("/")))
+            selected, required = map(int, count.removeprefix("已选择").split("/"))
+            if 0 < required <= len(SUPPLY_CENTERS) and 0 <= selected <= required:
+                return selected, required
         return None
 
+    def supply_card_selected(self, x: int) -> bool:
+        border = self.crop((x - 129, 766, x + 129, 795))
+        return bool((border.min(axis=2) > 210).mean(axis=1).max() > 0.65)
+
     @cached_property
-    def supply_cards(self) -> tuple[tuple[Label, str, bool], ...]:
+    def supply_layout(self) -> tuple[int, ...] | None:
+        layouts = (SUPPLY_FOUR_CENTERS, SUPPLY_CENTERS)
+
+        def has_top_edge(x):
+            # 取肖像框中央。另一种布局的卡间缝隙无法形成同样长的边。
+            strip = self.crop((x - 96, 280, x + 96, 310)).mean(axis=2)
+            edges = np.abs(np.diff(strip, axis=0)) > 12
+            return edges.mean(axis=1).max() >= 0.75
+
+        visible = [centers for centers in layouts if all(has_top_edge(x) for x in centers)]
+        if len(visible) == 1:
+            return visible[0]
+        # 装备文字靠近卡片中心，角色名左对齐。漏读一张卡不会改变布局。
+        equipment = [label.point[0] for label in self.texts((100, 674, 1830, 724))
+                     if re.fullmatch(EMPLOYEE_NAME, label.text)]
+        matches = [centers for centers in layouts if any(
+            abs(x - center) <= 65 for x in equipment for center in centers
+        )]
+        return matches[0] if len(matches) == 1 else None
+
+    def supply_cards(self, centers=None) -> tuple[tuple[Label, str, bool], ...]:
         cards = []
-        for x in SUPPLY_CENTERS:
+        for x in centers or self.supply_layout or SUPPLY_CENTERS:
             names = [label.text for label in self.texts((x - 129, 545, x + 129, 586))
                      if re.fullmatch(EMPLOYEE_NAME, label.text)]
             equipment = [label.text for label in self.texts((x - 137, 674, x + 137, 724))
@@ -1442,27 +1739,105 @@ class Frame:
         button_ready = (confirm.min(axis=2) > 177).mean() > 0.4
         return bool(button_ready and highlight.any(axis=0).mean() > 0.68)
 
-    def halo_portrait_matches(self, point: Point, portrait: np.ndarray) -> bool:
-        x, y = point
-        source = self.crop((x - 34, y - 35, x + 34, y + 35)).astype(np.float32)
-        target = cv2.resize(portrait.astype(np.float32), (42, 46), interpolation=cv2.INTER_CUBIC)
-        if target.std() < 12:
-            return False
-        score = cv2.matchTemplate(source, target, cv2.TM_CCOEFF_NORMED).max()
-        return bool(score >= 0.64)
+    def halo_portrait_scores(self, points: tuple[Point, ...], portrait: np.ndarray) -> tuple[float, ...]:
+        # 从备战页的原始裁片直接缩放，保留肖像细节。
+        template = cv2.resize(portrait.astype(np.float32), (42, 46), interpolation=cv2.INTER_AREA)
+        if template.std(axis=(0, 1)).max() < 12:
+            return (0.0,) * len(points)
+        scores = []
+        for x, y in points:
+            card = self.crop((x - 34, y - 35, x + 34, y + 35)).astype(np.float32)
+            scores.append(float(cv2.matchTemplate(card, template, cv2.TM_CCOEFF_NORMED).max()))
+        return tuple(scores)
 
     def halo_skip(self) -> Label | None:
         if self.page == Page.HALO:
             return self.enabled_button(self.find("跳过", "跳过主角光环", area=(715, 905, 1510, 1035)))
         return None
 
+    @cached_property
+    def halo_target_face(self) -> np.ndarray | None:
+        face = self.crop(HALO_TARGET_FACE)
+        return face if face.std(axis=(0, 1)).max() >= 15 else None
+
     def halo_target_present(self) -> bool:
-        return self.has("尚未选择主角光环", area=(740, 864, 1170, 918)) or any(
-            self.halo_effect_selected(index) for index in range(2)
+        return (self.halo_target_face is not None
+                or self.has("尚未选择主角光环", area=(740, 864, 1170, 918))
+                or any(self.halo_effect_selected(index) for index in range(2))
         )
+
+    @cached_property
+    def mentor_prompt(self) -> Label | None:
+        return self.find("角色作为师父", area=MENTOR_PROMPT, contains=True)
+
+    @cached_property
+    def mentor_confirm_label(self) -> Label | None:
+        return self.find("确认选择", area=MENTOR_CONFIRM)
+
+    @cached_property
+    def mentor_selection_prompt(self) -> Label | None:
+        return self.find("请选择一名角色", "请选择1名角色", area=(1230, 413, 1760, 599))
+
+    def mentor_confirm(self) -> Label | None:
+        if self.mentor_selection_prompt:
+            return None
+        return self._wide_confirm(self.mentor_confirm_label, MENTOR_CONFIRM, MENTOR_CONFIRM_X)
+
+    @cached_property
+    def mentor_candidates(self) -> tuple[Label, ...]:
+        # 候选会随名单和横向滚动移动。用名字行上方的青色卡面定位可见卡片。
+        button = self.mentor_confirm_label or self.mentor_confirm()
+        if button:
+            confirm_y = button.point[1]
+        elif self.mentor_selection_prompt:
+            confirm_y = self.mentor_selection_prompt.point[1] + 52
+        else:
+            confirm_y = 537 if self.image.width * 9 == self.image.height * 16 else 493
+        prompt_y = self.mentor_prompt.point[1] if self.mentor_prompt else 104
+        row = round(0.42 * prompt_y + 0.58 * confirm_y)
+        left, right = 190, 1755
+        r, g, b = self.crop((left, row - 36, right, row - 28)).astype(np.int16).transpose(2, 0, 1)
+        colored = (b > 108) & (g - r > 27) & (b - r > 40) & (10 * g > 7 * b)
+        columns = (colored.mean(axis=0) > 0.6).astype(np.uint8)
+        columns = cv2.morphologyEx(columns[None, :], cv2.MORPH_CLOSE, np.ones((1, 7), np.uint8))[0]
+        edges = np.flatnonzero(np.diff(np.r_[0, columns, 0])) + left
+        names = tuple(label for label in self.texts((left, row - 18, right, row + 18))
+                      if re.fullmatch(EMPLOYEE_NAME, label.text))
+        cards = []
+        for start, end in zip(edges[::2], edges[1::2]):
+            if end - start < 70:
+                continue
+            name = next((label.text for label in names if start <= label.point[0] < end), "候选角色")
+            cards.append(Label(name, (int((start + end) // 2), row - 68)))
+        if cards:
+            return tuple(cards)
+        if names:
+            return tuple(Label(label.text, (label.point[0], row - 68))
+                         for label in sorted(names, key=lambda label: label.point[0]))
+        if self.mentor_prompt and self.mentor_selection_prompt:
+            # 已确认从师要求选择。卡面和名字都漏读时尝试可见布局的中部卡位。
+            return tuple(Label("候选角色", (x, row - 68)) for x in (625, 930, 1212))
+        return ()
 
     def tea_signature(self):
         return tuple(label.text for label in self.texts((1120, 175, 1850, 855)))
+
+    @cached_property
+    def tea_shake_layout(self) -> bool:
+        return (self.has("幕后茶歇", area=(840, 128, 1080, 191))
+                and self.has("享用茶歇", area=(1340, 608, 1740, 700)))
+
+    @cached_property
+    def tea_menu_actions(self) -> tuple[Label, ...]:
+        chat = self.find("聊一聊", area=(180, 785, 574, 880))
+        heal = self.find("摇一摇", area=(1350, 785, 1780, 880))
+        if heal and self.has("回复20小队生命值", area=(1340, 735, 1790, 808), contains=True):
+            return (heal, chat) if chat else (heal,)
+        if chat or heal:
+            return tuple(label for label in (chat, heal) if label)
+        if self.tea_shake_layout:
+            return (Label("摇一摇", (1534, 837)),)
+        return ()
 
     def tea_button(self):
         tutorial = self.find("欢迎来到幕后茶歇", "离开幕后茶歇前", area=(615, 161, 1400, 293), contains=True)
@@ -1488,13 +1863,4 @@ class Frame:
         back = self.find("返回", area=(1115, 546, 1860, 870))
         if back:
             return back
-        chat = self.find("聊一聊", area=(180, 785, 574, 880))
-        heal = self.find("摇一摇", area=(1350, 785, 1780, 880))
-        if heal and self.has("回复20小队生命值", area=(1340, 735, 1790, 808), contains=True):
-            return heal
-        if chat or heal:
-            return chat or heal
-        if (self.has("幕后茶歇", area=(840, 128, 1080, 191))
-                and self.has("享用茶歇", area=(1340, 608, 1740, 700))):
-            return Label("摇一摇", (1534, 837))
-        return None
+        return next(iter(self.tea_menu_actions), None)

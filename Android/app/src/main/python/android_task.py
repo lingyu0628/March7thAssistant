@@ -81,11 +81,15 @@ def _ocr_parameters():
 class _TaskLog(logging.Handler):
     """把任务日志转给 Kotlin，并记下当前步骤里最后一条错误，作为这一步失败的原因。"""
 
-    def __init__(self, bridge):
-        super().__init__(logging.INFO)
+    def __init__(self, bridge, visible_level=logging.INFO):
+        super().__init__(logging.DEBUG)
+        self.setFormatter(logging.Formatter())
         self.bridge = bridge
+        self.visible_level = visible_level
         self.step = None
         self.last_error = None
+        self.diagnostics = []
+        self.last_flush = time.monotonic()
 
     def begin_step(self, name):
         self.step = name
@@ -94,6 +98,16 @@ class _TaskLog(logging.Handler):
     def emit(self, record):
         title = getattr(record, "section_title", None)
         message = title if title is not None else self.format(record)
+        time_ms = int(record.created * 1000)
+        if record.levelno < logging.INFO:
+            stamp = self.formatter.formatTime(record, "%H:%M:%S")
+            self.diagnostics.append((time_ms, f"{stamp} {message[:2000]}"))
+            if len(self.diagnostics) >= 32 or time.monotonic() - self.last_flush >= 2:
+                self.flush_diagnostics()
+            return
+        if record.levelno < self.visible_level:
+            return
+        self.flush_diagnostics()
         if record.levelno >= logging.ERROR:
             level = "ERROR"
             # run_steps 补的「<步骤名>未完成」不含原因，保留它之前的那条。
@@ -103,13 +117,23 @@ class _TaskLog(logging.Handler):
             level = "WARNING"
         else:
             level = "INFO"
-        self.bridge.log(int(record.created * 1000), level, "TASK", message, title is not None)
+        self.bridge.log(time_ms, level, "TASK", message, title is not None)
+
+    def flush_diagnostics(self):
+        if self.diagnostics:
+            start_ms = self.diagnostics[0][0]
+            self.bridge.log(start_ms, "DEBUG", "TASK", "\n".join(text for _, text in self.diagnostics), False)
+            self.diagnostics.clear()
+            self.last_flush = time.monotonic()
 
 
 class _AppSession:
+    _AUDIO_TIMEOUT = 7
+
     def __init__(self, client, bridge):
         self.client = client
         self.bridge = bridge
+        self._muted_package = None
 
     def request(self, command, **params):
         from utils.pause import RunStopRequested
@@ -117,6 +141,15 @@ class _AppSession:
         if self.bridge.isCancelled() and params.get("action") != "up":
             raise RunStopRequested()
         return self.client.request(command, **params)
+
+    def set_game_mute(self, package, on):
+        if on:
+            self._muted_package = package
+        self.bridge.audioRecoveryPending(True)
+        result, _ = self.request("mute", timeout=self._AUDIO_TIMEOUT, package=package, on=on)
+        if not on:
+            self.bridge.audioRecoveryPending(False)
+        return result
 
     def record_event(self, event):
         name = event["event"]
@@ -141,7 +174,16 @@ class _AppSession:
         return status["watchdog"].get("pid", -1) > 0
 
     def close(self):
+        from module.game.adb_transport import AdbError
+
         try:
+            if self._muted_package is not None and not self.client.closed:
+                package, self._muted_package = self._muted_package, None
+                try:
+                    self.client.request("mute", timeout=self._AUDIO_TIMEOUT, package=package, on=False)
+                    self.bridge.audioRecoveryPending(False)
+                except AdbError as error:
+                    log.warning(f"游戏音频恢复仍待确认：{error}")
             if not self.client.closed:
                 self.client.request("shutdown", timeout=2)
         finally:
@@ -159,8 +201,14 @@ def run(workdir, token, sdk, version, model, is_emulator, task, settings, panel_
     from module.logger import log
     from utils.pause import RunStopRequested
 
-    handler = _TaskLog(bridge)
     loggers = (log.logger, log.logger_title)
+    original_level = log.logger.level
+    effective_level = log.logger.getEffectiveLevel()
+    handler = _TaskLog(bridge, visible_level=effective_level)
+    existing_levels = [(output, output.level) for output in log.logger.handlers]
+    for output, level in existing_levels:
+        output.setLevel(max(level, effective_level))
+    log.logger.setLevel(min(effective_level, logging.DEBUG))
     for logger in loggers:
         logger.addHandler(handler)
     controller = session = ocr = None
@@ -231,7 +279,7 @@ def run(workdir, token, sdk, version, model, is_emulator, task, settings, panel_
             log.warning("设备端服务不支持保持系统唤醒")
         # 关闭时也发一次，让设备端修复旧版本留下的静音记录。静音失败不影响任务。
         try:
-            result, _ = session.request("mute", package=GAME_PACKAGE, on=mute_game)
+            result = session.set_game_mute(GAME_PACKAGE, mute_game)
             if mute_game:
                 log.info("已静音游戏，任务结束后恢复")
             elif result["original_mode"] == "ignore":
@@ -239,8 +287,12 @@ def run(workdir, token, sdk, version, model, is_emulator, task, settings, panel_
         except AdbError as error:
             log.warning(f"未能设置游戏静音：{error}")
         started = time.monotonic()
-        controller.start_game_process()
-        wait_for_game(controller, min(cfg.start_game_timeout * 60, 180))
+        startup_deadline = started + min(cfg.start_game_timeout * 60, 180)
+        controller.start_game_process(recover_startup=True)
+        wait_for_game(controller, startup_deadline - time.monotonic(), recover_without_frame=controller.recover_game_start)
+        controller.finish_game_startup()
+        if bridge.isCancelled():
+            raise RunStopRequested()
         elapsed = time.monotonic() - started
         log.info(f"游戏画面就绪，用时 {elapsed:.1f} 秒")
         bridge.gameReady(round(elapsed * 1000))
@@ -287,6 +339,8 @@ def run(workdir, token, sdk, version, model, is_emulator, task, settings, panel_
     except Exception as error:
         if bridge.isCancelled():
             return "stopped"
+        if getattr(error, "code", None) == "disconnected":
+            log.error(str(error))
         log.error(traceback.format_exc())
         return getattr(error, "code", "runtime_error")
     finally:
@@ -305,7 +359,15 @@ def run(workdir, token, sdk, version, model, is_emulator, task, settings, panel_
         except Exception as error:
             log.warning(f"设备端连接结束：{error}")
         finally:
-            if ocr is not None:
-                ocr.exit_ocr()
-            for logger in loggers:
-                logger.removeHandler(handler)
+            try:
+                if ocr is not None:
+                    ocr.exit_ocr()
+            finally:
+                try:
+                    handler.flush_diagnostics()
+                finally:
+                    for logger in loggers:
+                        logger.removeHandler(handler)
+                    log.logger.setLevel(original_level)
+                    for output, level in existing_levels:
+                        output.setLevel(level)

@@ -3,20 +3,21 @@ from module.config import cfg
 from module.localization import get_raw_instance_names
 from module.logger import log
 from module.screen import screen
+from tasks.base.task_steps import FATAL_GAME_ERRORS, run_steps
 from tasks.daily.buildtarget import BuildTarget
-from tasks.power.instance import Instance, TeamPresetUnavailable
+from tasks.power.instance import ChallengePageUnavailable, Instance, TeamPresetUnavailable
 from tasks.power.policy import (
-    ECHO, ORNAMENT, INSTANCE_LIMITS, BattleDefeat, RelicBagFull, PowerError, SupportDemand,
-    DEFEAT_RETRIES, batch_limit, check_balance, parse_power, run_plan,
+    ECHO, ORNAMENT, INSTANCE_LIMITS, BattleDefeat, InstanceUnavailable, RelicBagFull, PowerError, SupportDemand,
+    DEFEAT_RETRIES, batch_limit, parse_pc_power, plan_paid_batch, run_plan,
 )
-from tasks.power.readout import read_number
+from tasks.power.readout import read_immersifier_stock, read_number
 from tasks.power.supplement import supplement
 from tasks.power.weekly_relic_cleanup import WeeklyRelicCleanup
 from utils.date import Date
-import time
 
 
 MAP_POWER = (1588 / 1920, 35 / 1080, 198 / 1920, 56 / 1080)
+GUIDE_IMMERSIFIERS = (1623 / 1920, 40 / 1080, 162 / 1920, 52 / 1080)
 
 
 class Power:
@@ -24,17 +25,23 @@ class Power:
     def run(skip_weekly_cleanup=False, *, support=None):
         if not skip_weekly_cleanup:
             Power.run_weekly_relic_cleanup()
+        lookup_ok = True
         if support is None:
             from tasks.daily.daily import Daily
 
-            support = Daily.support_demand()
+            support = SupportDemand()
+
+            def query_support():
+                support.pending = Daily.support_demand().pending
+
+            lookup_ok = run_steps((("查询支援实训", query_support),))
 
         log.hr("开始清体力", 0)
         plan = cfg.power_plan
         if plan:
             complete = Power.execute_power_plan(support=support)
             if not complete or not cfg.power_plan_continue:
-                return True
+                return lookup_ok
 
         instance_type = cfg.instance_type
         instance_name = cfg.instance_names.get(instance_type)
@@ -47,10 +54,10 @@ class Power:
                 log.warning(f"获取培养目标副本失败，使用配置的副本：{error}")
         if instance_name == "无":
             log.info(f"{instance_type}未开启")
-            return True
+            return lookup_ok
         Power.process(instance_type, instance_name, support=support)
         log.hr("完成", 2)
-        return True
+        return lookup_ok
 
     @staticmethod
     def run_weekly_relic_cleanup():
@@ -81,6 +88,19 @@ class Power:
         ))
 
     @staticmethod
+    def process_immersifier_only():
+        name = cfg.instance_names[ORNAMENT]
+        try:
+            if cfg.build_target_enable:
+                for target_type, target_name in BuildTarget.get_target_instances():
+                    if target_type == ORNAMENT:
+                        name = target_name
+                        break
+        except Exception as error:
+            log.warning(f"获取培养目标副本失败，使用配置的副本：{error}")
+        return Power.process(ORNAMENT, name, immersifier_only=True)
+
+    @staticmethod
     def _run_instance(instance_type, name, planned, *, support=None, immersifier_only=False):
         if (instance_type not in INSTANCE_LIMITS
                 or not name or name not in get_raw_instance_names().get(instance_type, {}) or name == "无"):
@@ -91,16 +111,19 @@ class Power:
         limit = batch_limit(cfg, instance_type)
         is_echo = instance_type == ECHO
         is_ornament = instance_type == ORNAMENT
+        only_immersifiers = is_ornament and immersifier_only
         rewards = Instance.read_echo_rewards() if is_echo else None
         if rewards == 0:
             cfg.save_timestamp("echo_of_war_timestamp")
             if planned is None:
                 log.info("历战余响本周奖励次数已用完")
                 return
-        practice = rewards == 0
-        balance = Power.get(use_supplement=not practice and not immersifier_only)
-        if not practice and not is_ornament and balance < cost_per_wave:
-            log.info("开拓力不足，结束本副本项")
+        immersifiers = Power.get_immersifier_count() if is_ornament else 0
+        available = 0
+        if rewards != 0 and not only_immersifiers:
+            available = Power.get(use_supplement=not immersifier_only)
+        if rewards != 0 and not immersifiers and available < cost_per_wave:
+            log.info("饰品提取资源不足，结束本副本项" if is_ornament else "开拓力不足，结束本副本项")
             return
 
         world_team = False
@@ -112,56 +135,66 @@ class Power:
             Instance.heal_teams()
 
         def enter():
-            if not Instance.prepare_instance(instance_type, name):
-                raise PowerError(f"未能进入副本 {name}")
+            for attempt in range(1, 4):
+                try:
+                    if Instance.prepare_instance(instance_type, name):
+                        return
+                    raise PowerError(f"未能进入副本 {name}")
+                except FATAL_GAME_ERRORS:
+                    raise
+                except RuntimeError as error:
+                    if isinstance(error, InstanceUnavailable) or attempt == 3:
+                        raise
+                    log.warning(f"进入副本失败，重试 {attempt}/2：{error}")
 
-        enter()
         remaining = planned
         previous = 0
         borrowed = False
-        available = Instance.read_balance(instance_type)
+        enter()
         retries = 0
         cleaned = False
         while remaining is None or remaining > 0:
             practice = rewards == 0
             requested = limit if remaining is None else min(limit, remaining)
-            if not is_ornament:
-                if not practice:
-                    requested = min(requested, available // cost_per_wave)
-                    if is_echo:
-                        requested = min(requested, rewards)
-                elif planned is None:
+            if practice:
+                if planned is None:
                     break
-                else:
-                    requested = 1
-            if not requested:
-                log.info("开拓力不足，结束本副本项")
+                waves, cost, used_immersifiers = 1, 0, 0
+            else:
+                if is_echo:
+                    requested = min(requested, rewards)
+                waves, cost, used_immersifiers = plan_paid_batch(requested, available, cost_per_wave, immersifiers=immersifiers)
+            if not waves:
+                log.info("饰品提取资源不足，结束本副本项" if is_ornament else "开拓力不足，结束本副本项")
                 break
 
-            started = time.monotonic()
-            repeated = False
+            repeated = not practice and previous == waves and (not support.pending or borrowed)
             try:
-                if previous == requested and (not support.pending or borrowed):
-                    payment = Instance.repeat_payment(instance_type, requested, practice)
-                    if payment is not None and payment <= available and (not immersifier_only or payment == 0):
-                        Instance.start_instance_again(practice)
-                        waves, cost = requested, payment
-                        repeated = True
-
-                if not repeated:
+                if repeated:
+                    Instance.start_instance_again()
+                else:
                     if previous:
                         Instance.complete_run(instance_type)
                         enter()
                         previous = 0
-                        available = Instance.read_balance(instance_type)
-                    waves, cost = Instance.prepare_payment(
-                        instance_type, requested, available, practice=practice, immersifier_only=immersifier_only,
-                    )
-                    if not waves:
-                        break
-                    borrowed = Instance.start_instance(
-                        instance_type, name, support, practice=practice, world_team=world_team,
-                    )
+                    for attempt in range(1, 4):
+                        try:
+                            selected = Instance.select_waves(instance_type, waves)
+                            if selected != waves:
+                                # 支持只提供单场挑战的历战余响界面。
+                                waves, cost = selected, selected * cost_per_wave
+                            borrowed = Instance.start_instance(
+                                instance_type, name, support, practice=practice, world_team=world_team,
+                            )
+                        except ChallengePageUnavailable as error:
+                            if attempt == 3:
+                                raise
+                            log.warning(f"开打前准备失败，重新进入副本 {attempt}/2：{error}")
+                            # 先退出当前页面，重新进入后从默认一场设置波次。
+                            screen.change_to("main", max_recursion=1)
+                            enter()
+                        else:
+                            break
                 if not Instance.wait_fight(repeated=repeated):
                     Instance.exit_defeat()
                     raise BattleDefeat("副本挑战失败")
@@ -171,18 +204,14 @@ class Power:
                 Instance.select_world_team(instance_type, name)
                 world_team = True
                 enter()
-                available = Instance.read_balance(instance_type)
                 continue
             except BattleDefeat:
-                after = Power.get(use_supplement=False)
-                check_balance(available, after, 0, time.monotonic() - started)
                 if retries >= DEFEAT_RETRIES:
                     raise
                 retries += 1
-                log.warning(f"已确认战败且未扣费，重试 {retries}/{DEFEAT_RETRIES}")
+                log.warning(f"已确认战败，重试 {retries}/{DEFEAT_RETRIES}")
                 enter()
                 previous = 0
-                available = Instance.read_balance(instance_type)
                 continue
             except RelicBagFull:
                 if cleaned or not Instance.clean_full_bag():
@@ -190,32 +219,26 @@ class Power:
                 cleaned = True
                 enter()
                 previous = 0
-                available = Instance.read_balance(instance_type)
                 continue
 
-            completed = Instance.completed_waves(instance_type, waves)
             support.won(borrowed)
-            yield completed
-            after = Instance.read_balance(instance_type, result=True)
-            if completed != waves:
-                raise PowerError(f"实际结算 {completed}/{waves} 次，已保留确认的进度")
-            check_balance(available, after, cost, time.monotonic() - started)
-            log.info(f"已结算 {completed} 次，剩余开拓力 {after}/300")
-            available, previous, retries = after, waves, 0
+            available -= cost
+            immersifiers -= used_immersifiers
+            yield waves
+            log.info(f"已结算 {waves} 次")
+            previous, retries = waves, 0
             if remaining is not None:
-                remaining -= completed
+                remaining -= waves
             if is_echo and not practice:
-                # 奖励额度读数取自游戏，不能仅凭胜场写入周常时间。
-                Instance.complete_run(instance_type)
-                previous = 0
-                rewards = Instance.read_echo_rewards()
+                rewards -= waves
                 if rewards == 0:
                     cfg.save_timestamp("echo_of_war_timestamp")
-                    if planned is None:
-                        return
-                if remaining is None or remaining > 0:
+                Instance.complete_run(instance_type)
+                previous = 0
+                if rewards == 0 and planned is None:
+                    return
+                if remaining != 0 and (rewards == 0 or available >= cost_per_wave):
                     enter()
-                    available = Instance.read_balance(instance_type)
 
         if previous:
             Instance.complete_run(instance_type)
@@ -223,16 +246,21 @@ class Power:
             screen.change_to("main")
 
     @staticmethod
+    def get_immersifier_count():
+        screen.change_to("guide3")
+        return read_immersifier_stock(auto, GUIDE_IMMERSIFIERS)
+
+    @staticmethod
     def get(use_supplement=False):
         screen.change_to("map")
 
         def read():
-            return read_number(auto, MAP_POWER, parse_power, "未能确认当前开拓力")
+            return read_number(auto, MAP_POWER, parse_pc_power, "未能确认当前开拓力")
 
         balance = read()
         if use_supplement:
-            balance = supplement(auto, screen, cfg, balance, lambda: auto.click_element(
+            balance = supplement(auto, screen, cfg, balance, lambda: auto.find_element(
                 "./assets/images/share/power/trailblaze_power/trailblaze_power.png", "image", 0.9, crop=MAP_POWER,
-            ), read, return_screen="map")
+            ), read, return_screen="map", desktop=True)
         log.info(f"开拓力：{balance}/300")
         return balance

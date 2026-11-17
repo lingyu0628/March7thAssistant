@@ -57,6 +57,25 @@ data class TaskState(
         )
 }
 
+internal class TaskCleanup(private val onUnconfirmed: (Throwable) -> Unit) {
+    var confirmed = true
+        private set
+
+    fun unconfirmed(error: Throwable) {
+        confirmed = false
+        onUnconfirmed(error)
+    }
+
+    fun finish(taskResult: String, close: () -> Unit): String {
+        try {
+            close()
+        } catch (error: Exception) {
+            unconfirmed(error)
+        }
+        return if (!confirmed && (taskResult == "success" || taskResult == "stopped")) "cleanup_pending" else taskResult
+    }
+}
+
 /** 界面操作在主线程调用，任务和设备 I/O 串行执行。 */
 class TaskController private constructor(private val context: Context) {
     private val main = Handler(Looper.getMainLooper())
@@ -64,8 +83,11 @@ class TaskController private constructor(private val context: Context) {
     private val prefs = context.getSharedPreferences("task-options", Context.MODE_PRIVATE)
     private val usage = UsageTelemetry.get(context)
     private val access = DeviceAccess(context)
+    private val rootProbeInFlight = AtomicBoolean()
     private val marker = AtomicFile(File(context.filesDir, "active-task"))
     private val logFile = File(context.filesDir, "last-run.log")
+    private val diagnostics = RunDiagnostics(context.filesDir)
+    private val tracebackFallback = context.getString(R.string.logs_traceback_summary)
     private val logLock = Any()
     // 偏好键与早期版本不同名，旧键留在文件里也不会被读到。
     private val stateData = MutableStateFlow(
@@ -78,7 +100,7 @@ class TaskController private constructor(private val context: Context) {
         )
     )
     private val logData = MutableStateFlow(
-        runCatching { logFile.readRunLog(LOG_LINES) }.getOrDefault(emptyList())
+        runCatching { logFile.readRunLog(LOG_LINES).map { it.forDisplay(tracebackFallback) } }.getOrDefault(emptyList())
     )
     private val previewData = MutableStateFlow<GamePreviewSource?>(null)
     private var active: TaskRun? = null
@@ -102,6 +124,10 @@ class TaskController private constructor(private val context: Context) {
             stateData.update { it.copy(phase = TaskPhase.FAILED, errorCode = "interrupted") }
             recover()
         }
+        // 旧版只保存了所选模式，升级后对原先选用 Root 的用户补做一次检查。
+        if (state.value.privilege == Privilege.ROOT && prefs.getBoolean(KEY_ROOT_VERIFIED, true)) {
+            checkRootPermission()
+        }
         Shizuku.addBinderReceivedListenerSticky {
             refreshPermission()
             recover()
@@ -116,26 +142,46 @@ class TaskController private constructor(private val context: Context) {
     }
 
     fun refreshPermission() {
-        stateData.update { it.copy(permission = access.state(it.privilege)) }
+        stateData.update { it.copy(permission = permissionFor(it.privilege)) }
     }
+
+    private fun permissionFor(privilege: Privilege) =
+        if (privilege == Privilege.ROOT && rootProbeInFlight.get()) PermissionState.CHECKING else access.state(privilege)
 
     fun selectPrivilege(privilege: Privilege): Boolean {
         if (state.value.busy) return false
-        prefs.edit().putBoolean("root", privilege == Privilege.ROOT).apply()
-        stateData.update { it.copy(privilege = privilege, permission = access.state(privilege)) }
+        val edit = prefs.edit().putBoolean("root", privilege == Privilege.ROOT)
+        if (privilege == Privilege.ROOT && !prefs.contains(KEY_ROOT_VERIFIED)) edit.putBoolean(KEY_ROOT_VERIFIED, false)
+        edit.apply()
+        stateData.update { it.copy(privilege = privilege, permission = permissionFor(privilege)) }
+        recover()
         return true
     }
 
     fun requestPermission() {
         if (state.value.busy) return
         if (state.value.privilege == Privilege.ROOT) {
-            worker.execute {
-                runCatching { access.probeRoot() }
-                refreshPermission()
-            }
+            checkRootPermission()
         } else {
             runCatching { access.requestShizukuPermission() }
             refreshPermission()
+        }
+    }
+
+    private fun checkRootPermission() {
+        if (!rootProbeInFlight.compareAndSet(false, true)) return
+        refreshPermission()
+        worker.execute {
+            try {
+                runCatching { access.probeRoot() }.onFailure { Log.w("M7ARoot", "Root check failed", it) }
+                prefs.edit().putBoolean(KEY_ROOT_VERIFIED, access.state(Privilege.ROOT) == PermissionState.READY).apply()
+            } finally {
+                rootProbeInFlight.set(false)
+                main.post {
+                    refreshPermission()
+                    recover()
+                }
+            }
         }
     }
 
@@ -155,9 +201,8 @@ class TaskController private constructor(private val context: Context) {
 
     fun start(): Boolean {
         refreshPermission()
-        recover()
         val snapshot = state.value
-        if (snapshot.busy) return false
+        if (snapshot.busy || snapshot.permission == PermissionState.CHECKING) return false
         if (snapshot.permission != PermissionState.READY) {
             usage.preflightError(snapshot.task, snapshot.privilege, "permission_unavailable")
             return false
@@ -191,7 +236,10 @@ class TaskController private constructor(private val context: Context) {
 
     /** 在 I/O 线程调用，复制当前一轮的 UTF-8 日志。流由调用者关闭。 */
     fun exportLog(output: OutputStream) {
-        synchronized(logLock) { logFile.inputStream().use { it.copyTo(output) } }
+        synchronized(logLock) {
+            logFile.inputStream().use { it.copyTo(output) }
+            diagnostics.exportTo(output)
+        }
     }
 
     internal fun begin(onFinished: () -> Unit): Boolean {
@@ -235,18 +283,19 @@ class TaskController private constructor(private val context: Context) {
         return false
     }
 
-    private fun recover() {
+    internal fun recover() {
         if (!marker.baseFile.exists() || state.value.busy) return
-        val stale = runCatching { marker.readFully().decodeToString() }.getOrNull()
-        if (stale == Privilege.SHIZUKU.name && access.state(Privilege.SHIZUKU) != PermissionState.READY) return
+        val saved = runCatching { Privilege.valueOf(marker.readFully().decodeToString()) }.getOrNull()
+        val privilege = listOfNotNull(saved, state.value.privilege)
+            .firstOrNull { access.state(it) == PermissionState.READY } ?: return
         stateData.update { it.copy(service = ServiceState.RECOVERING) }
         worker.execute {
             try {
-                if (stale == Privilege.SHIZUKU.name) access.recoverShizuku()
+                access.recoverAudio(privilege)
                 marker.delete()
-                appLog(LogLevel.INFO, "已检查上次异常结束的设备端租约")
+                appLog(LogLevel.INFO, "已完成上次运行的音频恢复检查")
             } catch (error: Exception) {
-                appLog(LogLevel.WARNING, "上次运行的清理仍待确认：${error.javaClass.simpleName}")
+                appLog(LogLevel.WARNING, "上次运行的音频恢复仍待确认：${error.message}")
             } finally {
                 stateData.update { it.copy(service = ServiceState.IDLE) }
             }
@@ -258,10 +307,15 @@ class TaskController private constructor(private val context: Context) {
 
     private fun appendLog(entry: LogEntry) {
         synchronized(logLock) {
-            runCatching { logFile.appendText(entry.toLogText(), Charsets.UTF_8) }.onFailure {
+            runCatching {
+                if (entry.level == LogLevel.DEBUG) diagnostics.append(entry)
+                else logFile.appendText(entry.toLogText(), Charsets.UTF_8)
+            }.onFailure {
                 Log.w("M7ATask", "Cannot write task log", it)
             }
-            logData.update { (it + entry).takeLast(LOG_LINES) }
+            if (entry.level != LogLevel.DEBUG) {
+                logData.update { (it + entry.forDisplay(tracebackFallback)).takeLast(LOG_LINES) }
+            }
         }
     }
 
@@ -271,6 +325,10 @@ class TaskController private constructor(private val context: Context) {
         internal val stopTimeout = Runnable { if (active === this) Process.killProcess(Process.myPid()) }
         private var device: DeviceLease? = null
         private var deviceError: String? = null
+        private val cleanup = TaskCleanup { error ->
+            appLog(LogLevel.ERROR, context.getString(R.string.log_task_cleanup_unconfirmed, error))
+        }
+        private var audioPending = marker.baseFile.exists()
         private var movingBack = false
         private var usageRun: UsageTelemetry.Run? = null
         private var usageStage = UsageStage.PREPARING
@@ -296,11 +354,11 @@ class TaskController private constructor(private val context: Context) {
                 },
             )
             var result = "runtime_error"
-            var cleanupConfirmed = true
             try {
                 usageRun = usage.startTask(snapshot.task, snapshot.privilege, snapshot.config.panelOff)
                 synchronized(logLock) {
                     logFile.writeText("")
+                    diagnostics.clear()
                     logData.value = emptyList()
                 }
                 val markerStream = marker.startWrite()
@@ -317,15 +375,15 @@ class TaskController private constructor(private val context: Context) {
                 appLog(LogLevel.ERROR, "任务执行失败：${error.message}")
                 result = if (isCancelled()) "stopped" else "runtime_error"
             } finally {
+                val taskResult = result
                 try {
-                    cleaning()
-                    device?.close()
-                } catch (error: Exception) {
-                    cleanupConfirmed = false
-                    result = "cleanup_pending"
-                    appLog(LogLevel.ERROR, "设备端服务清理超时：${error.message}")
+                    result = cleanup.finish(taskResult) {
+                        renewal.use {
+                            cleaning()
+                            device?.close()
+                        }
+                    }
                 } finally {
-                    renewal.close()
                     val steps = state.value.steps
                     val outcome = when {
                         result == "success" -> UsageOutcome.SUCCESS
@@ -334,10 +392,10 @@ class TaskController private constructor(private val context: Context) {
                         else -> UsageOutcome.FAILED
                     }
                     usage.finishTask(
-                        usageRun, outcome, if (cleanupConfirmed) usageStage else UsageStage.CLEANUP,
+                        usageRun, outcome, if (result == taskResult) usageStage else UsageStage.CLEANUP,
                         result, steps.firstOrNull { it.status == StepStatus.FAILED }?.step, timings,
                     )
-                    if (cleanupConfirmed) marker.delete()
+                    if (cleanup.confirmed && !audioPending) marker.delete()
                 }
                 val level = if (result == "success" || result == "stopped") LogLevel.INFO else LogLevel.ERROR
                 appLog(level, "本轮结束：$result")
@@ -434,8 +492,13 @@ class TaskController private constructor(private val context: Context) {
                 return opened.port
             } catch (error: DeviceFailure) {
                 deviceError = error.code
+                error.suppressed.forEach(cleanup::unconfirmed)
                 throw error
             }
+        }
+
+        fun audioRecoveryPending(pending: Boolean) {
+            audioPending = pending
         }
 
         fun previewReady(port: Int) {
@@ -558,6 +621,7 @@ class TaskController private constructor(private val context: Context) {
         // 更早的版本用过 task 和 tasks，这里换一个没用过的名字。
         private const val KEY_TASK = "selected-task"
         private const val KEY_CONFIG = "task-config"
+        private const val KEY_ROOT_VERIFIED = "root-probe-verified"
         private const val KEY_DAILY_DONE = "last-daily-done"
         private const val KEY_ECHO_DONE = "last-echo-done"
         private const val LOG_LINES = 200

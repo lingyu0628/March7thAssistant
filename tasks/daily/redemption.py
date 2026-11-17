@@ -1,10 +1,12 @@
 from module.screen import screen
 from module.automation import auto
 from module.config import cfg
+from module.config.platform import get_control_backend
 from module.logger import log
 from module.game import get_game_controller
 from utils.color import red, green, yellow
 import tasks.reward as reward
+from tasks.base.task_steps import FATAL_GAME_ERRORS
 import time
 import json
 import datetime
@@ -135,7 +137,7 @@ class Redemption:
         log.hr("获取最新兑换码", 0)
 
         # 如果云游戏启用，默认使用国服
-        if cfg.cloud_game_enable:
+        if get_control_backend(cfg) == "cloud":
             server = 'cn'
         elif sys.platform == 'win32':
             from utils.registry.star_rail_setting import get_server_by_registry
@@ -150,7 +152,7 @@ class Redemption:
             codes = valid_codes_for_server(server)
         except Exception as e:
             log.warning(f"获取兑换码失败: {e}")
-            codes = []
+            return False
 
         # 判断哪些兑换码是未使用过的
         try:
@@ -164,11 +166,14 @@ class Redemption:
         if not codes:
             log.info("没有找到有效的兑换码")
             log.hr("完成", 2)
-            return False
+            return True
 
         log.info(f"当前服务器类型为{"国服" if server == "cn" else "国际服"}，找到{len(codes)}个有效兑换码，开始尝试兑换")
         log.hr("完成", 2)
-        return Redemption.start(codes=codes, send_notification=True)
+        Redemption.start(codes=codes, send_notification=True)
+        # 已使用、已过期等明确结果也会记录在已处理列表。超时或无法操作的兑换码留待下次。
+        handled = set(getattr(cfg, "already_used_codes", None) or ())
+        return handled.issuperset(codes)
 
     @staticmethod
     def start(codes: Optional[List[str]] = None, send_notification: bool = False) -> bool:
@@ -250,7 +255,12 @@ class Redemption:
             if send_notification:
                 notif.notify(content=msg, level=NotificationLevel.ALL)
 
-            reward.start_specific("mail")
+            try:
+                reward.start_specific("mail")
+            except FATAL_GAME_ERRORS:
+                raise
+            except Exception as error:
+                log.warning(f"兑换码已记为成功，邮件奖励待领取：{error}")
             log.hr("完成", 2)
             return True
         else:

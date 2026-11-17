@@ -1,4 +1,5 @@
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -6,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from module.config.config import Config
+from tasks.base.task_steps import GameRecoveryError
 
 
 @pytest.mark.parametrize("env_value, cli, expected", [
@@ -35,6 +37,10 @@ def test_startup_wait_uses_cli_or_environment(monkeypatch, env_value, cli, expec
     game.after_finish_is_loop.side_effect = InterruptedError
     game.start.side_effect = InterruptedError
     scope.update(game=game, version=MagicMock(), notif=MagicMock(), telemetry=MagicMock(), time=MagicMock(), CloudGameZeroDurationError=type("CloudGameZeroDurationError", (Exception,), {}))
+    scope["get_ui_profile"] = lambda _: SimpleNamespace(name="pc_1080")
+    scope["GameRecoveryError"] = GameRecoveryError
+    scope["_game_connection"] = lambda _: nullcontext()
+    scope["Daily"] = MagicMock()
     exec(compile(ast.Module(body=[run], type_ignores=[]), str(source), "exec"), scope)
     with pytest.raises(InterruptedError):
         scope["run_main_actions"](args.no_run_immediately)

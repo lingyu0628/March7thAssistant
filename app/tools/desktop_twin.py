@@ -53,12 +53,13 @@ _BAR_MARGINS = {False: (16, 12, 16, 12), True: (12, 12, 12, 12)}
 _BAR_BORDER = 1  # 按钮栏与画面之间的描边，与 qss 中 #footerBar 的描边宽度一致
 
 
-def docs_url():
+def docs_url(section=None):
     """按界面语言打开对应译本，没有译本时回退到简体中文文档。"""
     from module.localization.languages import localized_doc_path
 
     doc = os.path.splitext(os.path.basename(localized_doc_path("DesktopTwin")))[0]
-    return _DOCS_URL.format(doc=doc)
+    url = _DOCS_URL.format(doc=doc)
+    return f"{url}?id={section}" if section else url
 
 
 def _set_frame_theme(hwnd, dark):
@@ -280,6 +281,7 @@ class DesktopTwinDialog(QDialog):
         self._logoff_until = None
         self._logoff_lease = None
         self._error = ""
+        self._error_doc_section = None
         # 分身的声音由本进程里的 RDP 控件播放，窗口看不见时静音
         self._audio = ProcessAudioMuter(marker=os.path.abspath(os.path.join("temp", "desktop_twin_muted")))
         self._audio_check_at = 0.0
@@ -393,6 +395,9 @@ class DesktopTwinDialog(QDialog):
         # 错误放在说明页里完整显示；连接后画面区域固定，改由底栏显示
         self._errorHolder = QWidget(intro)
         self._errorBar = NoticeBar(InfoBarIcon.ERROR, self._errorHolder, closable=True)
+        self._error_docs_button = HyperlinkButton(self._errorBar)
+        self._error_docs_button.setIcon(FIF.HELP)
+        self._errorBar.addWidget(self._error_docs_button)
         self._errorBar.closed.connect(self._dismiss_error)
         errorLayout = QVBoxLayout(self._errorHolder)
         errorLayout.setContentsMargins(0, 12, 0, 0)
@@ -702,9 +707,11 @@ class DesktopTwinDialog(QDialog):
         )
         for label, text in zip(self._pointLabels, points):
             label.setText(text)
-        self._docs_button.setText(tr("使用文档"))
-        self._docs_button.setUrl(docs_url())
+        self._docs_button.setText(tr("常见问题") if self._error else tr("使用文档"))
+        self._docs_button.setUrl(docs_url(self._error_doc_section if self._error else None))
         self._docs_button.setToolTip(tr("在浏览器中打开桌面分身的使用文档"))
+        self._error_docs_button.setText(tr("查看排查方法"))
+        self._error_docs_button.setUrl(self._docs_button.getUrl())
 
         closing = self._quit_until is not None or self._logoff_until is not None
         opening = self._launcher is not None or self._launch_until is not None
@@ -763,7 +770,10 @@ class DesktopTwinDialog(QDialog):
             self._errorBar.setContent(self._error)
             self._errorBar.show()
         self._errorHolder.setVisible(show_error)
-        if error_changed:
+        if error_changed or show_error:
+            # 排查按钮会压缩文字宽度；更换错误或切换语言后也要按换行重新计算高度。
+            for widget in (self._errorBar, self._errorHolder, self._intro):
+                widget.updateGeometry()
             self._fit_intro()
         self._update_bar_layout()  # 显示哪些按钮、按钮文字都会影响侧栏宽度
 
@@ -771,8 +781,9 @@ class DesktopTwinDialog(QDialog):
         self._error = ""
         self.retranslateUi()
 
-    def _report(self, error):
+    def _report(self, error, *, rdp_code=None):
         self._error = str(error)
+        self._error_doc_section = "rdp-516" if rdp_code == 516 else "常见问题"
         self._log.appendLog(f"桌面分身：{error}\n")
         self.retranslateUi()
 
@@ -894,8 +905,9 @@ class DesktopTwinDialog(QDialog):
         self._refresh_recovery_session()
 
     def _poll_connection(self, now, *, auto_launch=True):
-        if self._rdp.error is not None:
-            error = tr("分身连接失败（RDP {code}）").format(code=self._rdp.error)
+        rdp_code = self._rdp.error
+        if rdp_code is not None:
+            error = tr("分身连接失败（RDP {code}）").format(code=rdp_code)
         elif self._rdp.logged_on:
             first_connection = self._session is None
             try:
@@ -929,7 +941,7 @@ class DesktopTwinDialog(QDialog):
         else:
             return
         self._cancel_connection()
-        self._report(error)
+        self._report(error, rdp_code=rdp_code)
 
     def _contact_assistant(self, payload=None):
         if owned_session_info(self._session) is None:

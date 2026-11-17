@@ -1,5 +1,6 @@
 from module.screen import screen
 from module.config import cfg
+from module.config.platform import get_control_backend
 from module.game import cloud_game, require_desktop_task
 from module.localization import tr
 from module.logger import log
@@ -205,7 +206,7 @@ class Universe:
             log.warning("模拟宇宙功能仅支持 Windows 平台")
             return False
 
-        if cfg.cloud_game_enable and cloud_game.is_headless():
+        if get_control_backend(cfg) == "cloud" and cloud_game.is_headless():
             log.error("模拟宇宙不支持无界面模式运行")
             return False
 
@@ -265,35 +266,7 @@ class Universe:
 
     @staticmethod
     def process_ornament():
-        screen.change_to("guide3")
-
-        immersifier_crop = (1623.0 / 1920, 40.0 / 1080, 162.0 / 1920, 52.0 / 1080)
-        text = auto.get_single_line_text(crop=immersifier_crop, blacklist=['+', '米'], max_retries=3)
-        if "/12" not in text:
-            log.error("沉浸器数量识别失败")
-            return
-
-        immersifier_count = int(text.split("/")[0])
-        log.info(f"沉浸器: {immersifier_count}/12")
-        if immersifier_count > 0:
-            instance_name = cfg.instance_names["饰品提取"]
-
-            # 使用培养目标的副本配置（如果启用）
-            try:
-                if cfg.build_target_enable:
-                    from tasks.daily.buildtarget import BuildTarget
-                    target_instances = BuildTarget.get_target_instances()
-
-                    for target_type, target_name in target_instances:
-                        # 精确匹配副本类型
-                        if target_type == "饰品提取":
-                            log.info(f"使用培养目标副本: {target_name}")
-                            instance_name = target_name
-                            break
-            except Exception as e:
-                log.error(f"获取培养目标副本失败: {e}")
-
-            Power.process("饰品提取", instance_name, immersifier_only = True)
+        Power.process_immersifier_only()
 
     @staticmethod
     def gui():
